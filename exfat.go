@@ -65,11 +65,10 @@ func (e *ExFAT) getAllEntriesInfo(entries []Entry, path, dstdir string, long boo
 				}
 				fmt.Println("Extracted: ", entry.name)
 			}
-			continue
+		} else {
+			entryString = getDirEntry(entry, path, long)
+			fmt.Println(entryString)
 		}
-
-		entryString = getDirEntry(entry, path, long)
-		fmt.Println(entryString)
 
 		subentries, err := e.ReadDir(entry)
 		if err != nil {
