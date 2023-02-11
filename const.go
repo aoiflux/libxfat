@@ -77,3 +77,4 @@ const ZERO_ENTRY_CLUSTER = 0x0
 const DELETED = " (deleted)"
 
 var ErrDeletedEntry = errors.New("unable to read deleted entry")
+var ErrInvalidEntry = errors.New("unable to read invalid entry")

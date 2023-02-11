@@ -2,6 +2,7 @@ package libxfat
 
 import (
 	"fmt"
+	"path/filepath"
 )
 
 // GetAllocatedClusters function is experimental, it may not work correctly all the time
@@ -30,17 +31,39 @@ func (e *ExFAT) GetClusterSize() uint64 {
 	return e.vbr.clusterSize
 }
 
-func (e *ExFAT) ExtractFileContent(entry Entry, dstpath string) error {
+func (e *ExFAT) ExtractEntryContent(entry Entry, dstpath string) error {
+	if entry.IsInvalid() {
+		return ErrInvalidEntry
+	}
 	if entry.IsDeleted() {
 		return ErrDeletedEntry
 	}
-	return e.vbr.extractFileContent(entry, dstpath)
+	if entry.IsDir() {
+		fmt.Println("Extracting a FOLDER: ", entry.name)
+	}
+	return e.vbr.extractEntryContent(entry, dstpath)
 }
 
-func (e *ExFAT) ShowAllFilesInfo(entries []Entry, path string, long bool) error {
+func (e *ExFAT) ExtractAllFiles(rootEntries []Entry, dstdir string) error {
+	return e.getAllEntriesInfo(rootEntries, "/", dstdir, false, true)
+}
+
+func (e *ExFAT) ShowAllEntriesInfo(rootEntries []Entry, path string, long bool) error {
+	return e.getAllEntriesInfo(rootEntries, path, "", long, false)
+}
+
+func (e *ExFAT) getAllEntriesInfo(entries []Entry, path, dstdir string, long bool, extract bool) error {
 	var entryString string
 
 	for _, entry := range entries {
+		if extract && entry.IsValid() && entry.IsFile() && entry.IsIndexed() {
+			dstpath := filepath.Join(dstdir, entry.name)
+			err := e.ExtractEntryContent(entry, dstpath)
+			if err != nil {
+				return err
+			}
+		}
+
 		entryString = getDirEntry(entry, path, long)
 		fmt.Println(entryString)
 
@@ -49,7 +72,7 @@ func (e *ExFAT) ShowAllFilesInfo(entries []Entry, path string, long bool) error 
 			return err
 		}
 
-		err = e.ShowAllFilesInfo(subentries, path+entry.name+"/", long)
+		err = e.getAllEntriesInfo(subentries, path+entry.name+"/", dstdir, long, extract)
 		if err != nil {
 			return err
 		}

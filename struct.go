@@ -84,6 +84,9 @@ func (e Entry) DoesNotHaveFatChain() bool {
 func (e Entry) HasFatChain() bool {
 	return !e.noFatChain
 }
+func (e Entry) IsIndexed() bool {
+	return !e.IsDeleted()
+}
 func (e Entry) IsDeleted() bool {
 	return e.entryCluster == ZERO_ENTRY_CLUSTER || e.etype == EXFAT_DIRRECORD_DEL_FILEDIR
 }

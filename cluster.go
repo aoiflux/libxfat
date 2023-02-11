@@ -95,7 +95,7 @@ func (v *VBR) readContent(entry Entry) ([]byte, error) {
 	return data[:entry.dataLen], nil
 }
 
-func (v *VBR) extractFileContent(entry Entry, dstpath string) error {
+func (v *VBR) extractEntryContent(entry Entry, dstpath string) error {
 	dstfile, err := os.Create(dstpath)
 	if err != nil {
 		return err

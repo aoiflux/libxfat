@@ -1,3 +1,3 @@
-module github.com/gaurav-gogia/libxfat
+module github.com/aoiflux/libxfat
 
 go 1.19
