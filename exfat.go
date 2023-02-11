@@ -56,13 +56,15 @@ func (e *ExFAT) getAllEntriesInfo(entries []Entry, path, dstdir string, long boo
 	var entryString string
 
 	for _, entry := range entries {
-		if extract && entry.IsValid() && entry.IsFile() && entry.IsIndexed() {
-			dstpath := filepath.Join(dstdir, entry.name)
-			err := e.ExtractEntryContent(entry, dstpath)
-			if err != nil {
-				return err
+		if extract {
+			if entry.IsValid() && entry.IsFile() && entry.IsIndexed() {
+				dstpath := filepath.Join(dstdir, entry.name)
+				err := e.ExtractEntryContent(entry, dstpath)
+				if err != nil {
+					return err
+				}
+				fmt.Println("Extracted: ", entry.name)
 			}
-			fmt.Println("Extracted: ", entry.name)
 			continue
 		}
 
