@@ -130,8 +130,3 @@ func (e *ExFAT) initEntryState(clusetrdata []byte, offset, remainingSC, entrySta
 	e.remainingSC = remainingSC
 	e.entryState = entryState
 }
-
-type EntryIterator struct {
-	OneEntry Entry
-	OneErr   error
-}
