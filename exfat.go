@@ -84,7 +84,7 @@ func (e *ExFAT) getAllEntriesInfo(entries []Entry, path, dstdir string, long boo
 	return nil
 }
 
-func (e *ExFAT) GetFiles(rootEntries []Entry) ([]Entry, error) {
+func (e *ExFAT) GetAllEntries(rootEntries []Entry) ([]Entry, error) {
 	var err error
 	allEntries := rootEntries
 	subEntries := rootEntries
