@@ -84,35 +84,46 @@ func (e *ExFAT) getAllEntriesInfo(entries []Entry, path, dstdir string, long boo
 	return nil
 }
 
-func (e *ExFAT) GetFiles(rootEntries []Entry) ([]Entry, error) {
-	var err error
-	allEntries := rootEntries
+func (e *ExFAT) GetSubEntries(rootEntries []Entry) chan EntryIterator {
+	iteratorChan := make(chan EntryIterator)
 	subEntries := rootEntries
+
 	for {
-		subEntries, err = e.ReadDirs(subEntries)
-		if err != nil {
-			return nil, err
+		var tempSubDirs []Entry
+		for entryIterator := range e.ReadDirs(subEntries) {
+			iteratorChan <- entryIterator
+			tempSubDirs = append(tempSubDirs, entryIterator.OneEntry)
 		}
+
+		subEntries = tempSubDirs
 		if subEntries == nil || len(subEntries) < 1 {
 			break
 		}
-		allEntries = append(allEntries, subEntries...)
 	}
-	return allEntries, err
+	close(iteratorChan)
+
+	return iteratorChan
 }
 
-func (e *ExFAT) ReadDirs(rootEntries []Entry) ([]Entry, error) {
-	var entries []Entry
+func (e *ExFAT) ReadDirs(rootEntries []Entry) chan EntryIterator {
+	iteratorChan := make(chan EntryIterator)
+	var iterator EntryIterator
 
 	for _, entry := range rootEntries {
 		subentries, err := e.ReadDir(entry)
 		if err != nil {
-			return nil, err
+			iterator.OneErr = err
+			iteratorChan <- iterator
 		}
-		entries = append(entries, subentries...)
-	}
 
-	return entries, nil
+		for _, subentry := range subentries {
+			iterator.OneEntry = subentry
+			iteratorChan <- iterator
+		}
+	}
+	close(iteratorChan)
+
+	return iteratorChan
 }
 
 func (e *ExFAT) ReadDir(entry Entry) ([]Entry, error) {
