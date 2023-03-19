@@ -132,7 +132,7 @@ func (v *VBR) extractEntryContent(entry Entry, dstpath string) error {
 }
 
 func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
-	sizeInClusters, _ := v.size2Clusters(entry.dataLen)
+	sizeInClusters, remainder := v.size2Clusters(entry.dataLen)
 	clusterList := getRange(entry.entryCluster, sizeInClusters)
 
 	var err error
@@ -143,7 +143,21 @@ func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
 		}
 	}
 
-	filetail := entry.dataLen / v.clusterSize
+	latestCluster := clusterList[len(clusterList)-1]
+	_, err = v.readClusters(latestCluster, 1)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	filetail := v.clusterSize
+	if remainder > 0 {
+		filetail = uint64(remainder)
+	}
+
+	if dataRemainder := entry.dataLen / v.clusterSize; dataRemainder > 0 {
+		filetail = dataRemainder
+	}
+
 	return clusterList, filetail, nil
 }
 
