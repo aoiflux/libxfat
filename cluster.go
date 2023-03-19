@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 )
 
 func (v *VBR) getClusterOffset(cluster uint32) uint64 {
@@ -133,7 +132,7 @@ func (v *VBR) extractEntryContent(entry Entry, dstpath string) error {
 }
 
 func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
-	sizeInClusters, remainder := v.size2Clusters(entry.dataLen)
+	sizeInClusters, _ := v.size2Clusters(entry.dataLen)
 	clusterList := getRange(entry.entryCluster, sizeInClusters)
 
 	var err error
@@ -144,21 +143,7 @@ func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
 		}
 	}
 
-	latestCluster := clusterList[len(clusterList)-1]
-	data, err := v.readClusters(latestCluster, 1)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	filetail := v.clusterSize
-	if remainder > 0 {
-		filetail = uint64(remainder)
-	}
-
-	if index := strings.LastIndex(string(data), EOF); index != -1 {
-		filetail = uint64(index) + 5
-	}
-
+	filetail := entry.dataLen / v.clusterSize
 	return clusterList, filetail, nil
 }
 
