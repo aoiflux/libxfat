@@ -10,7 +10,11 @@ func (e Entry) GetValidDataLen() string {
 	return humanize(e.validDataLen)
 }
 
-func getDirEntry(entry Entry, path string, long bool) string {
+func getDirEntry(entry Entry, path string, long, simple bool) string {
+	if simple {
+		return entry.name
+	}
+
 	if long {
 		return getDirEntryLong(entry, path)
 	}

@@ -45,41 +45,47 @@ func (e *ExFAT) ExtractEntryContent(entry Entry, dstpath string) error {
 }
 
 func (e *ExFAT) ExtractAllFiles(rootEntries []Entry, dstdir string) error {
-	return e.getAllEntriesInfo(rootEntries, "/", dstdir, false, true)
+	return e.getAllEntriesInfo(rootEntries, "/", dstdir, false, false, true)
 }
 
-func (e *ExFAT) ShowAllEntriesInfo(rootEntries []Entry, path string, long bool) error {
-	return e.getAllEntriesInfo(rootEntries, path, "", long, false)
+func (e *ExFAT) ShowAllEntriesInfo(rootEntries []Entry, path string, long, simple bool) error {
+	return e.getAllEntriesInfo(rootEntries, path, "", long, simple, false)
 }
 
-func (e *ExFAT) getAllEntriesInfo(entries []Entry, path, dstdir string, long bool, extract bool) error {
-	var entryString string
-
+func (e *ExFAT) getAllEntriesInfo(entries []Entry, path, dstdir string, long, simple, extract bool) error {
 	for _, entry := range entries {
-		if extract {
-			if entry.IsValid() && entry.IsFile() && entry.IsIndexed() {
-				dstpath := filepath.Join(dstdir, entry.name)
-				err := e.ExtractEntryContent(entry, dstpath)
-				if err != nil {
-					return err
-				}
-				fmt.Println("Extracted: ", entry.name)
-			}
-		} else {
-			entryString = getDirEntry(entry, path, long)
-			fmt.Println(entryString)
-		}
+		e.processEntry(entry, path, dstdir, extract, long, simple)
 
 		subentries, err := e.ReadDir(entry)
 		if err != nil {
 			return err
 		}
 
-		err = e.getAllEntriesInfo(subentries, path+entry.name+"/", dstdir, long, extract)
+		err = e.getAllEntriesInfo(subentries, path+entry.name+"/", dstdir, long, simple, extract)
 		if err != nil {
 			return err
 		}
 	}
+
+	return nil
+}
+
+func (e ExFAT) processEntry(entry Entry, path, dstdir string, extract, long, simple bool) error {
+	if extract {
+		if entry.IsValid() && entry.IsFile() && entry.IsIndexed() {
+			dstpath := filepath.Join(dstdir, entry.name)
+			err := e.ExtractEntryContent(entry, dstpath)
+			if err != nil {
+				return err
+			}
+			fmt.Println("Extracted: ", entry.name)
+		}
+
+		return nil
+	}
+
+	entryString := getDirEntry(entry, path, long, simple)
+	fmt.Println(entryString)
 
 	return nil
 }
