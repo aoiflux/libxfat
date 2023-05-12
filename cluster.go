@@ -154,10 +154,6 @@ func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
 		filetail = uint64(remainder)
 	}
 
-	if dataRemainder := entry.dataLen / v.clusterSize; dataRemainder > 0 {
-		filetail = dataRemainder
-	}
-
 	return clusterList, filetail, nil
 }
 
