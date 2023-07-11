@@ -23,7 +23,7 @@ func getDirEntry(entry Entry, path string, long, simple bool) string {
 	modifiedTime := getDateTimeString(entry.modified, uint32(entry.modified10ms))
 	fileAttributes := getFileAttributes(entry.entryAttr)
 
-	shortname := fmt.Sprintf("%s %s %d %d %s", modifiedTime, fileAttributes, entry.entryCluster, entry.dataLen, fullpath)
+	shortname := fmt.Sprintf("Modified Time: %s\nFile Attributes: %s\nEntry Cluster: %d\nSize: %d\nFullPath: %s\n", modifiedTime, fileAttributes, entry.entryCluster, entry.dataLen, fullpath)
 	return shortname
 }
 
@@ -45,6 +45,6 @@ func getDirEntryLong(entry Entry, path string) string {
 	accessedtime := getDateTimeString(entry.accessed, 0)
 	createdTime := getDateTimeString(entry.created, uint32(entry.created10ms))
 
-	longname := fmt.Sprintf("%s i=%d l=%d %s m=%s a=%s b=%s sc=%d %s %s%s", typestr, entry.entryCluster, entry.dataLen, fileAttributes, modifiedTime, accessedtime, createdTime, entry.secondaryCount, nfc, fullpath, deleted)
+	longname := fmt.Sprintf("Type:%s\nEntryCluster:%d\nSize:%d\nFileAttributes:%s\nModifiedTime:%s\nAcessedTime:%s\nCreatedTime:%s\nSecondaryCount:%d\nNoFatChain:%s\nFullPath:%s%s\n", typestr, entry.entryCluster, entry.dataLen, fileAttributes, modifiedTime, accessedtime, createdTime, entry.secondaryCount, nfc, fullpath, deleted)
 	return longname
 }
