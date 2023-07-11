@@ -101,6 +101,24 @@ func (v *VBR) extractEntryContent(entry Entry, dstpath string) error {
 	}
 	defer dstfile.Close()
 
+	if !entry.noFatChain {
+		return v.extractFatChainedContent(entry, dstfile)
+	}
+
+	return v.extractContiguesContent(entry, dstfile)
+}
+
+func (v *VBR) extractContiguesContent(entry Entry, dstfile *os.File) error {
+	entryClusterOffset := v.getClusterOffset(entry.entryCluster)
+	_, err := v.dimage.Seek(int64(entryClusterOffset), io.SeekStart)
+	if err != nil {
+		return err
+	}
+	_, err = io.CopyN(dstfile, v.dimage, int64(entry.dataLen))
+	return err
+}
+
+func (v *VBR) extractFatChainedContent(entry Entry, dstfile *os.File) error {
 	clusterList, filetail, err := v.getClusterList(entry)
 	if err != nil {
 		return err
@@ -123,12 +141,9 @@ func (v *VBR) extractEntryContent(entry Entry, dstpath string) error {
 	if err != nil {
 		return err
 	}
-	_, err = dstfile.Write(data[:filetail])
-	if err != nil {
-		return err
-	}
 
-	return nil
+	_, err = dstfile.Write(data[:filetail])
+	return err
 }
 
 func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {

@@ -38,14 +38,17 @@ func (e *ExFAT) ExtractEntryContent(entry Entry, dstpath string) error {
 	if entry.IsDeleted() {
 		return ErrDeletedEntry
 	}
-	if entry.IsDir() {
-		fmt.Println("Extracting a FOLDER: ", entry.name)
-	}
 	return e.vbr.extractEntryContent(entry, dstpath)
 }
 
 func (e *ExFAT) ExtractAllFiles(rootEntries []Entry, dstdir string) error {
-	return e.getAllEntriesInfo(rootEntries, "/", dstdir, false, false, true)
+	err := e.getAllEntriesInfo(rootEntries, "/", dstdir, false, false, true)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Done!")
+	return nil
 }
 
 func (e *ExFAT) ShowAllEntriesInfo(rootEntries []Entry, path string, long, simple bool) error {
@@ -78,7 +81,6 @@ func (e ExFAT) processEntry(entry Entry, path, dstdir string, extract, long, sim
 			if err != nil {
 				return err
 			}
-			fmt.Println("Extracted: ", entry.name)
 		}
 
 		return nil
