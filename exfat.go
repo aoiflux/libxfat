@@ -92,6 +92,33 @@ func (e ExFAT) processEntry(entry Entry, path, dstdir string, extract, long, sim
 	return nil
 }
 
+func (e *ExFAT) GenEntry(rootEntries []Entry) (<-chan Entry, <-chan error) {
+	entryChan := make(chan Entry)
+	errChan := make(chan error)
+
+	go func() {
+		defer close(entryChan)
+		defer close(errChan)
+
+		var err error
+		subEntries := rootEntries
+
+		for {
+			subEntries, err = e.ReadDirs(subEntries)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			for _, entry := range subEntries {
+				entryChan <- entry
+			}
+		}
+	}()
+
+	return entryChan, errChan
+}
+
 func (e *ExFAT) GetAllEntries(rootEntries []Entry) ([]Entry, error) {
 	var err error
 	allEntries := rootEntries
