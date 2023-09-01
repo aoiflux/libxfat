@@ -93,20 +93,42 @@ func (e ExFAT) processEntry(entry Entry, path, dstdir string, extract, long, sim
 }
 
 // limit - 2,14,74,83,646 entries
-func (e *ExFAT) GetAllEntries(rootEntries []Entry) ([]Entry, error) {
+func (e *ExFAT) GetIndexableEntries(rootEntries []Entry) ([]Entry, error) {
+	return e.GetAllEntries(rootEntries, true)
+}
+
+// limit - 2,14,74,83,646 entries
+func (e *ExFAT) GetAllEntries(rootEntries []Entry, indexable ...bool) ([]Entry, error) {
+	var flag bool
 	var err error
-	allEntries := rootEntries
+	var allEntries []Entry
 	subEntries := rootEntries
+
+	if len(indexable) > 0 {
+		flag = indexable[0]
+	}
+
 	for {
+		if subEntries == nil {
+			break
+		}
+
+		for _, subEntry := range subEntries {
+			if flag {
+				if subEntry.IsDeleted() || subEntry.IsDir() || subEntry.IsInvalid() || subEntry.HasFatChain() {
+					continue
+				}
+			}
+
+			allEntries = append(allEntries, subEntry)
+		}
+
 		subEntries, err = e.ReadDirs(subEntries)
 		if err != nil {
 			return nil, err
 		}
-		if subEntries == nil || len(subEntries) < 1 {
-			break
-		}
-		allEntries = append(allEntries, subEntries...)
 	}
+
 	return allEntries, err
 }
 
