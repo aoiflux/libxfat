@@ -1,6 +1,9 @@
 package libxfat
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func (e Entry) GetDataLen() string {
 	return humanize(e.dataLen)
@@ -37,7 +40,7 @@ func getDirEntryLong(entry Entry, path string) string {
 
 	var deleted string
 	typestr := fmt.Sprintf("0x%v", entry.etype)
-	if entry.IsDeleted() {
+	if entry.IsDeleted() && !strings.HasSuffix(entry.name, DELETED) {
 		deleted = DELETED
 	}
 	fileAttributes := getFileAttributes(entry.entryAttr)

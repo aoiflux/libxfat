@@ -195,7 +195,7 @@ func (e *ExFAT) parseDir(clusterdata []byte) []Entry {
 		case EXFAT_DIRRECORD_LABEL:
 			e.populateDirRecordLabel()
 		case EXFAT_DIRRECORD_NOLABEL:
-			// todo: do something with this type of entry
+			e.entry.name = ""
 		case EXFAT_DIRRECORD_BITMAP, EXFAT_DIRRECORD_UPCASE:
 			e.populateRecordBitmapUpcase()
 		case EXFAT_DIRRECORD_VOLUME_GUID:
