@@ -130,3 +130,6 @@ func (e *ExFAT) initEntryState(clusetrdata []byte, offset, remainingSC, entrySta
 	e.remainingSC = remainingSC
 	e.entryState = entryState
 }
+func (e *ExFAT) GetVolumeLabel() string {
+	return e.vbr.volumeLabel
+}
