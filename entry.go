@@ -13,6 +13,13 @@ func (e Entry) GetValidDataLen() string {
 	return humanize(e.validDataLen)
 }
 
+func (e Entry) IsIndexable() bool {
+	return !e.IsNotIndexable()
+}
+func (e Entry) IsNotIndexable() bool {
+	return e.IsDeleted() || e.IsDir() || e.IsInvalid() || e.HasFatChain()
+}
+
 func getDirEntry(entry Entry, path string, long, simple bool) string {
 	if simple {
 		return entry.name

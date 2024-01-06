@@ -51,6 +51,27 @@ func (e *ExFAT) ExtractAllFiles(rootEntries []Entry, dstdir string) error {
 	return nil
 }
 
+func (e *ExFAT) GetFullPathIndexableEntries(entries []Entry, path string) ([]Entry, error) {
+	for _, entry := range entries {
+		entry.name = path + entry.name
+		if entry.IsIndexable() {
+			entries = append(entries, entry)
+		}
+
+		subentries, err := e.ReadDir(entry)
+		if err != nil {
+			return nil, err
+		}
+
+		_, err = e.GetFullPathIndexableEntries(subentries, path+entry.name+"/")
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return entries, nil
+}
+
 func (e *ExFAT) ShowAllEntriesInfo(rootEntries []Entry, path string, long, simple bool) error {
 	return e.getAllEntriesInfo(rootEntries, path, "", long, simple, false)
 }
@@ -114,12 +135,9 @@ func (e *ExFAT) GetAllEntries(rootEntries []Entry, indexable ...bool) ([]Entry, 
 		}
 
 		for _, subEntry := range subEntries {
-			if flag {
-				if subEntry.IsDeleted() || subEntry.IsDir() || subEntry.IsInvalid() || subEntry.HasFatChain() {
-					continue
-				}
+			if flag && subEntry.IsNotIndexable() {
+				continue
 			}
-
 			allEntries = append(allEntries, subEntry)
 		}
 
