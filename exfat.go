@@ -52,10 +52,13 @@ func (e *ExFAT) ExtractAllFiles(rootEntries []Entry, dstdir string) error {
 }
 
 func (e *ExFAT) GetFullPathIndexableEntries(entries []Entry, path string) ([]Entry, error) {
+	var retentries []Entry
+
 	for _, entry := range entries {
 		entry.name = path + entry.name
+
 		if entry.IsIndexable() {
-			entries = append(entries, entry)
+			retentries = append(retentries, entry)
 		}
 
 		subentries, err := e.ReadDir(entry)
@@ -63,13 +66,14 @@ func (e *ExFAT) GetFullPathIndexableEntries(entries []Entry, path string) ([]Ent
 			return nil, err
 		}
 
-		_, err = e.GetFullPathIndexableEntries(subentries, path+entry.name+"/")
+		tempRet, err := e.GetFullPathIndexableEntries(subentries, entry.name+"/")
 		if err != nil {
 			return nil, err
 		}
+		retentries = append(retentries, tempRet...)
 	}
 
-	return entries, nil
+	return retentries, nil
 }
 
 func (e *ExFAT) ShowAllEntriesInfo(rootEntries []Entry, path string, long, simple bool) error {
