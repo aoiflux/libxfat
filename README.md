@@ -199,9 +199,6 @@ Build libxfat from the source and intsall dependencies:
 ---
 
 ## Contributing
-
-- **💬 [Join the Discussions](https://github.com/aoiflux/libxfat/discussions)**:
-  Share your insights, provide feedback, or ask questions.
 - **🐛 [Report Issues](https://github.com/aoiflux/libxfat/issues)**: Submit bugs
   found or log feature requests for the `libxfat` project.
 - **💡
