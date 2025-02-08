@@ -35,7 +35,7 @@
   - [Installation](#installation)
 - [Contributing](#contributing)
 - [Cite Paper](#cite)
-
+- [Read Paper](#paper)
 ---
 
 ## Overview
@@ -250,4 +250,8 @@ Build libxfat from the source and intsall dependencies:
 ## Cite
 Gogia, G., & Rughani, P. (2024). Parex: A novel exfat parser for file system
 forensics. Computación y Sistemas, 28(2). https://doi.org/10.13053/cys-28-2-4804
+
+## Paper
+[PAREX: A Novel exFAT Parser for File System Forensics](https://www.scielo.org.mx/scielo.php?script=sci_arttext&pid=S1405-55462024000200421#:~:text=This%20research%20proposes%20a%20novel%20open-source%20exFAT%20file,of%20disk%20images%20ranging%20from%201MiB%20to%201TiB)
 ---
+
