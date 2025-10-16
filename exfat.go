@@ -5,6 +5,19 @@ import (
 	"path/filepath"
 )
 
+// hasRangeForClusterData reports whether e.clusterdata has at least
+// length bytes starting from start. It avoids panics when parsing
+// partially available cluster buffers.
+func (e *ExFAT) hasRangeForClusterData(start, length int) bool {
+	if e.clusterdata == nil {
+		return false
+	}
+	if start < 0 || length < 0 {
+		return false
+	}
+	return start+length <= len(e.clusterdata)
+}
+
 // GetAllocatedClusters function is experimental, it may not work correctly all the time
 // It has been tested to work correctly if used directly after parsing root entries
 func (e *ExFAT) GetAllocatedClusters() (uint32, error) {
@@ -208,46 +221,110 @@ func (e *ExFAT) GetUsedSpace() string {
 func (e *ExFAT) parseDir(clusterdata []byte) []Entry {
 	var entries []Entry
 	e.initEntryState(clusterdata, 0, 0, ENTRY_STATE_START)
-	var namepart string
+	// no string assembly here; we accumulate UTF-16 units instead
+	// reset per-set parsing state
+	e.setChecksum = 0
+	e.expectedChecksum = 0
+	e.expectedSC = 0
+	e.expectedNameLen = 0
+	e.nameUnits = nil
 
 	for (e.offset < len(clusterdata)) && clusterdata[e.offset] != 0 {
+		// Ensure a full directory record is available before parsing it.
+		if e.offset+EXFAT_DIRRECORD_SIZE > len(clusterdata) {
+			// Not enough bytes remain for a complete record; stop parsing.
+			break
+		}
+
 		e.dirtype = clusterdata[e.offset]
 
 		switch e.dirtype {
 		case EXFAT_DIRRECORD_LABEL:
-			e.populateDirRecordLabel()
+			// Validate volume label/no-label entry
+			if e.validateVolLabelDentry(clusterdata[e.offset : e.offset+EXFAT_DIRRECORD_SIZE]) {
+				e.populateDirRecordLabel()
+			}
 		case EXFAT_DIRRECORD_NOLABEL:
 			e.entry.name = ""
 		case EXFAT_DIRRECORD_BITMAP, EXFAT_DIRRECORD_UPCASE:
-			e.populateRecordBitmapUpcase()
+			rec := clusterdata[e.offset : e.offset+EXFAT_DIRRECORD_SIZE]
+			if (e.dirtype == EXFAT_DIRRECORD_BITMAP && e.validateAllocBitmapDentry(rec)) ||
+				(e.dirtype == EXFAT_DIRRECORD_UPCASE && e.validateUpcaseTableDentry(rec)) {
+				e.populateRecordBitmapUpcase()
+			}
 		case EXFAT_DIRRECORD_VOLUME_GUID:
 			e.entry.name = VOLUME
 		default:
 			// 0x85
 			if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
-				e.populateDirRecordDel()
+				rec := clusterdata[e.offset : e.offset+EXFAT_DIRRECORD_SIZE]
+				if e.validateFileDentry(rec) {
+					// Update checksum with this record treating bytes 2..3 as zero (file dir entry)
+					e.setChecksum = exfatDirSetChecksumAdd(0, rec, true)
+					e.populateDirRecordDel()
+					e.expectedSC = int(e.entry.secondaryCount)
+					// Capture expected checksum from the record (bytes 2..3 LE)
+					b0 := uint16(rec[2])
+					b1 := uint16(rec[3])
+					e.expectedChecksum = b0 | (b1 << 8)
+					e.expectedNameLen = 0
+					e.nameUnits = nil
+				}
 			}
 			// 0xc0
 			if ((e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_STREAM_EXT) &&
 				(e.entryState == ENTRY_STATE_85_SEEN) {
-				e.populateDirRecordStreamSeen()
+				rec := clusterdata[e.offset : e.offset+EXFAT_DIRRECORD_SIZE]
+				if e.validateFileStreamDentry(rec) {
+					// Add stream entry to checksum
+					e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec, false)
+					e.populateDirRecordStreamSeen()
+					e.expectedNameLen = int(e.entry.nameLen)
+				}
 			}
 			// 0xc1
 			if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILENAME_EXT {
-				namepart = unicodeFromAscii(clusterdata[e.offset+2:e.offset+EXFAT_DIRRECORD_SIZE], 15)
+				rec := clusterdata[e.offset : e.offset+EXFAT_DIRRECORD_SIZE]
+				if e.validateFileNameDentry(rec) {
+					// Include this filename entry into checksum and assemble name units.
+					e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec, false)
 
-				if (e.entryState == ENTRY_STATE_85_SEEN) && (e.remainingSC >= 1) {
-					e.entry.name += namepart
-					e.remainingSC--
+					// Each filename entry contains up to 15 UTF-16 chars starting at byte offset 2
+					raw := rec[2:EXFAT_DIRRECORD_SIZE]
+					units := utf16leUnitsFromBytes(raw, 15)
+					e.nameUnits = append(e.nameUnits, units...)
 
-					if e.remainingSC == 0 {
-						if e.entry.IsDeleted() {
-							e.entry.name += DELETED
+					if (e.entryState == ENTRY_STATE_85_SEEN) && (e.remainingSC >= 1) {
+						// Defer UTF-8 conversion until the end to use expectedNameLen
+						e.remainingSC--
+
+						if e.remainingSC == 0 {
+							// Truncate to expectedNameLen (from stream entry) if provided
+							if e.expectedNameLen > 0 && len(e.nameUnits) > e.expectedNameLen {
+								e.nameUnits = e.nameUnits[:e.expectedNameLen]
+							}
+							// Only accept if checksum matches (unless optimistic parsing is enabled)
+							checksumOK := (e.expectedChecksum == e.setChecksum)
+							if e.optimistic || checksumOK {
+								e.entry.name = utf16UnitsToString(e.nameUnits)
+							} else {
+								// Reject or blank the name if checksum fails
+								e.entry.name = ""
+							}
+							if e.entry.IsDeleted() {
+								e.entry.name += DELETED
+							}
+
+							entries = append(entries, e.entry)
+							// Reset per-set state
+							e.entry.name = ""
+							e.entryState = ENTRY_STATE_LAST_C1_SEEN
+							e.setChecksum = 0
+							e.expectedChecksum = 0
+							e.expectedSC = 0
+							e.expectedNameLen = 0
+							e.nameUnits = nil
 						}
-
-						entries = append(entries, e.entry)
-						e.entry.name = ""
-						e.entryState = ENTRY_STATE_LAST_C1_SEEN
 					}
 				}
 			}
@@ -262,15 +339,17 @@ func (e *ExFAT) parseDir(clusterdata []byte) []Entry {
 func (e *ExFAT) populateDirRecordLabel() {
 	count := int(e.clusterdata[e.offset+1])
 	startOffset := e.offset + 2
-	if startOffset >= len(e.clusterdata) {
-		startOffset = len(e.clusterdata) - 1
+	// Validate offsets and perform safe slicing.
+	if !e.hasRangeForClusterData(startOffset, 0) {
+		// Nothing to do; cluster buffer too small for label start.
+		e.vbr.volumeLabel = ""
+		return
 	}
 
-	endOffset := e.offset + count*2
-	if endOffset >= len(e.clusterdata) {
-		endOffset = len(e.clusterdata) - 1
+	endOffset := e.offset + 2 + count*2
+	if endOffset > len(e.clusterdata) {
+		endOffset = len(e.clusterdata)
 	}
-
 	if startOffset > endOffset {
 		startOffset = endOffset
 	}
@@ -278,6 +357,10 @@ func (e *ExFAT) populateDirRecordLabel() {
 	e.vbr.volumeLabel = string(label)
 }
 func (e *ExFAT) populateRecordBitmapUpcase() {
+	// Ensure the fields we will read exist
+	if !e.hasRangeForClusterData(e.offset+20, 12) {
+		return
+	}
 	entryCluster := unpackLELong(e.clusterdata[e.offset+20 : e.offset+24])
 	dataLen := unpackLELongLong(e.clusterdata[e.offset+24 : e.offset+32])
 
@@ -308,6 +391,12 @@ func (e *ExFAT) populateRecordBitmapUpcase() {
 	}
 }
 func (e *ExFAT) populateDirRecordDel() {
+	// Make sure we have at least the minimum bytes to parse the fields we need.
+	if !e.hasRangeForClusterData(e.offset, 22) {
+		// Buffer too small; treat as partial and return.
+		return
+	}
+
 	e.entry.etype = e.dirtype
 	e.entry.seenRecords = []byte{e.dirtype}
 	e.entry.secondaryCount = uint32(e.clusterdata[e.offset+1])
@@ -315,18 +404,18 @@ func (e *ExFAT) populateDirRecordDel() {
 	e.entry.created = unpackLELong(e.clusterdata[e.offset+8 : e.offset+12])
 	e.entry.modified = unpackLELong(e.clusterdata[e.offset+12 : e.offset+16])
 	e.entry.accessed = unpackLELong(e.clusterdata[e.offset+16 : e.offset+20])
-	if len(e.clusterdata)-1 >= e.offset+20 {
-		e.entry.created10ms = e.clusterdata[e.offset+20]
-	}
-	if len(e.clusterdata)-1 >= e.offset+21 {
-		e.entry.modified10ms = e.clusterdata[e.offset+21]
-	}
+	e.entry.created10ms = e.clusterdata[e.offset+20]
+	e.entry.modified10ms = e.clusterdata[e.offset+21]
 	e.remainingSC = int(e.entry.secondaryCount)
 	if e.dirtype == EXFAT_DIRRECORD_FILEDIR {
 		e.entryState = ENTRY_STATE_85_SEEN
 	}
 }
 func (e *ExFAT) populateDirRecordStreamSeen() {
+	if !e.hasRangeForClusterData(e.offset, EXFAT_DIRRECORD_SIZE) {
+		return
+	}
+
 	e.entry.nameLen = e.clusterdata[e.offset+3]
 	e.entry.readNameLen = 0
 	e.entry.entryCluster = unpackLELong(e.clusterdata[e.offset+20 : e.offset+24])
@@ -334,7 +423,7 @@ func (e *ExFAT) populateDirRecordStreamSeen() {
 	e.entry.validDataLen = unpackLELongLong(e.clusterdata[e.offset+24 : e.offset+32])
 
 	e.entry.noFatChain = false
-	if (e.clusterdata[e.offset+1] & NOT_FAT_CHAIN_FLAG) > 1 {
+	if (e.clusterdata[e.offset+1] & NOT_FAT_CHAIN_FLAG) != 0 {
 		e.entry.noFatChain = true
 	}
 

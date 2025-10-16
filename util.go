@@ -67,6 +67,58 @@ func unicodeFromAscii(raw []byte, unicodeCharCount int) string {
 	return string(decodedString)
 }
 
+// exfatDirSetChecksumAdd updates the running 16-bit checksum for a 32-byte
+// directory record. For the first FILE directory entry in a set, the checksum
+// field (bytes 2 and 3) must be treated as zero while computing the checksum.
+func exfatDirSetChecksumAdd(accum uint16, record []byte, isFileDir bool) uint16 {
+	// exFAT directory record size is fixed (32 bytes), but be defensive.
+	limit := EXFAT_DIRRECORD_SIZE
+	if len(record) < limit {
+		limit = len(record)
+	}
+	for i := 0; i < limit; i++ {
+		b := record[i]
+		if isFileDir && (i == 2 || i == 3) {
+			b = 0
+		}
+		// Rotate right by 1 and add the byte (keep 16-bit)
+		accum = ((accum >> 1) | (accum << 15)) + uint16(b)
+	}
+	return accum
+}
+
+// utf16leUnitsFromBytes converts raw little-endian bytes to UTF-16 code units.
+// It reads up to maxUnits units. If maxUnits <= 0, it decodes all available pairs.
+func utf16leUnitsFromBytes(raw []byte, maxUnits int) []uint16 {
+	nPairs := len(raw) / 2
+	if maxUnits > 0 && nPairs > maxUnits {
+		nPairs = maxUnits
+	}
+	units := make([]uint16, 0, nPairs)
+	for i := 0; i < nPairs; i++ {
+		lo := uint16(raw[i*2])
+		hi := uint16(raw[i*2+1])
+		units = append(units, lo|(hi<<8))
+	}
+	return units
+}
+
+// utf16UnitsToString decodes UTF-16 code units to a UTF-8 string, skipping NULs.
+func utf16UnitsToString(units []uint16) string {
+	if len(units) == 0 {
+		return ""
+	}
+	// Filter zero code units (trailing NULs)
+	filtered := units[:0]
+	for _, u := range units {
+		if u != 0 {
+			filtered = append(filtered, u)
+		}
+	}
+	runes := utf16.Decode(filtered)
+	return string(runes)
+}
+
 func getDateTimeString(datetime, ms uint32) string {
 	year := (datetime >> 25) + 1980
 	month := (datetime >> 21) & 0xf

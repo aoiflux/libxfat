@@ -110,6 +110,12 @@ type ExFAT struct {
 	clusterdata  []byte
 	dirtype      byte
 	optimistic   bool
+	// Parsing state for filename/checksum assembly
+	setChecksum     uint16
+	expectedChecksum uint16
+	expectedSC      int
+	expectedNameLen int
+	nameUnits       []uint16
 }
 
 func New(imagefile *os.File, optimistic bool, offset ...uint64) (ExFAT, error) {
