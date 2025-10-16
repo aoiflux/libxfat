@@ -52,13 +52,21 @@ type Entry struct {
 }
 
 func (e Entry) IsInvalid() bool {
-	return !e.IsValid() || e.IsBitmapUpcase()
+	return !e.IsValid() || e.IsSpecialFile()
 }
 func (e Entry) IsValid() bool {
 	return e.etype == EXFAT_DIRRECORD_FILEDIR
 }
 func (e Entry) IsBitmapUpcase() bool {
 	return e.name == BITMAP || e.name == UPCASE || e.etype == EXFAT_DIRRECORD_BITMAP || e.etype == EXFAT_DIRRECORD_UPCASE
+}
+func (e Entry) IsSpecialFile() bool {
+	// Check if entry is a special/metadata file (bitmap, upcase, volume GUID, TexFAT, ACT)
+	if e.IsBitmapUpcase() {
+		return true
+	}
+	return e.name == VOLUME_GUID || e.name == TEXFAT || e.name == ACT ||
+		e.etype == EXFAT_DIRRECORD_VOLUME_GUID || e.etype == EXFAT_DIRRECORD_TEXFAT || e.etype == EXFAT_DIRRECORD_ACT
 }
 func (e Entry) GetNameLength() byte {
 	return e.nameLen

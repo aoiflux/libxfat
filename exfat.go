@@ -1,7 +1,9 @@
 package libxfat
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 )
 
@@ -22,7 +24,7 @@ func (e *ExFAT) hasRangeForClusterData(start, length int) bool {
 // It has been tested to work correctly if used directly after parsing root entries
 func (e *ExFAT) GetAllocatedClusters() (uint32, error) {
 	content, err := e.vbr.readContent(e.vbr.bitmapEntry)
-	if err != nil && err.Error() != EOF {
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrEOF) {
 		return 0, err
 	}
 	allocatedClusters := countBitmap(content)
@@ -186,7 +188,7 @@ func (e *ExFAT) ReadDir(entry Entry) ([]Entry, error) {
 		return nil, nil
 	}
 	content, err := e.vbr.readContent(entry)
-	if err != nil && err.Error() != EOF {
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrEOF) {
 		return nil, err
 	}
 	return e.parseDir(content), err
@@ -251,9 +253,27 @@ func (e *ExFAT) parseDir(clusterdata []byte) []Entry {
 			if (e.dirtype == EXFAT_DIRRECORD_BITMAP && e.validateAllocBitmapDentry(rec)) ||
 				(e.dirtype == EXFAT_DIRRECORD_UPCASE && e.validateUpcaseTableDentry(rec)) {
 				e.populateRecordBitmapUpcase()
+				// Add the special file entry to the list
+				entries = append(entries, e.virtualEntry)
 			}
 		case EXFAT_DIRRECORD_VOLUME_GUID:
-			e.entry.name = VOLUME
+			// Create entry for volume GUID
+			e.virtualEntry.etype = e.dirtype
+			e.virtualEntry.name = VOLUME_GUID
+			e.virtualEntry.entryAttr = 0
+			entries = append(entries, e.virtualEntry)
+		case EXFAT_DIRRECORD_TEXFAT:
+			// Create entry for TexFAT
+			e.virtualEntry.etype = e.dirtype
+			e.virtualEntry.name = TEXFAT
+			e.virtualEntry.entryAttr = 0
+			entries = append(entries, e.virtualEntry)
+		case EXFAT_DIRRECORD_ACT:
+			// Create entry for Access Control Table
+			e.virtualEntry.etype = e.dirtype
+			e.virtualEntry.name = ACT
+			e.virtualEntry.entryAttr = 0
+			entries = append(entries, e.virtualEntry)
 		default:
 			// 0x85
 			if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {

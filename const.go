@@ -40,6 +40,8 @@ const (
 	EXFAT_DIRRECORD_FILEDIR          = 0x85
 	EXFAT_DIRRECORD_DEL_FILEDIR      = 0x05
 	EXFAT_DIRRECORD_VOLUME_GUID      = 0xA0
+	EXFAT_DIRRECORD_TEXFAT           = 0xA1
+	EXFAT_DIRRECORD_ACT              = 0xE2
 	EXFAT_DIRRECORD_STREAM_EXT       = 0xC0
 	EXFAT_DIRRECORD_DEL_STREAM_EXT   = 0x40
 	EXFAT_DIRRECORD_FILENAME_EXT     = 0xC1
@@ -67,14 +69,23 @@ const (
 )
 
 const (
-	BITMAP = "$BitMap"
-	UPCASE = "$UpCase"
-	VOLUME = "$Volume"
-	EOF    = "EOF"
+	BITMAP      = "$BitMap"
+	UPCASE      = "$UpCase"
+	VOLUME      = "$Volume"
+	VOLUME_GUID = "$Volume GUID"
+	TEXFAT      = "$TexFAT"
+	ACT         = "$ACT"
+	MBR         = "$MBR"
+	FAT1        = "$FAT1"
+	FAT2        = "$FAT2"
+	EOF         = "EOF"
 )
 
 const ZERO_ENTRY_CLUSTER = 0x0
 const DELETED = " (deleted)"
 
+// Sentinel error for EOF - used when reading content may legitimately hit EOF
+// Use errors.Is(err, ErrEOF) or errors.Is(err, io.EOF) to check
+var ErrEOF = errors.New("EOF")
 var ErrDeletedEntry = errors.New("unable to read deleted entry")
 var ErrInvalidEntry = errors.New("unable to read invalid entry")
