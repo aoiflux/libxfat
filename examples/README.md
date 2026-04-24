@@ -7,6 +7,7 @@ common workflows.
 
 ```bash
 go run ./examples/list-root -image /path/to/volume.exfat
+go run ./examples/list-all -image /path/to/volume.exfat
 go run ./examples/volume-stats -image /path/to/volume.exfat
 go run ./examples/extract-all -image /path/to/volume.exfat -out ./recovered
 ```
@@ -21,6 +22,8 @@ Each program also accepts:
 
 - `list-root`: open an image and print the root directory entries, including
   metadata and virtual entries.
+- `list-all`: traverse the full filesystem and print every reachable indexable
+  entry with its full path.
 - `volume-stats`: parse the root directory and report cluster counts, cluster
   size, used-space percentage, and root entry counts.
 - `extract-all`: extract every regular file reachable from the root directory

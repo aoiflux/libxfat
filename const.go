@@ -50,7 +50,13 @@ const (
 	NOT_FAT_CHAIN_FLAG = 0x02
 )
 
-const FINAL_CLUSTER = 0xffffffff
+const (
+	EXFAT_CLUSTER_MASK = 0x0fffffff
+	EXFAT_BAD_CLUSTER  = 0x0ffffff7
+	EXFAT_EOF_START    = 0x0ffffff8
+	EXFAT_EOF_END      = 0x0fffffff
+	FINAL_CLUSTER      = EXFAT_EOF_END
+)
 
 // entry constants
 const (
@@ -90,3 +96,7 @@ const DELETED = " (deleted)"
 var ErrEOF = errors.New("EOF")
 var ErrDeletedEntry = errors.New("unable to read deleted entry")
 var ErrInvalidEntry = errors.New("unable to read invalid entry")
+var ErrInvalidCluster = errors.New("invalid cluster")
+var ErrBadCluster = errors.New("bad cluster in FAT chain")
+var ErrClusterChainLoop = errors.New("cluster chain loop detected")
+var ErrAllocationBitmapNotFound = errors.New("allocation bitmap not found")

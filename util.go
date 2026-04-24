@@ -14,21 +14,14 @@ func countBitmap(bitmapContent []byte) uint32 {
 	rem := len(bitmapContent) % 4
 	var allocated uint32
 
-	for i := 0; i < length; i++ {
+	for i := range length {
 		allocated += countBits(unpackLELong(bitmapContent[i*4 : (i+1)*4]))
 	}
 
 	if rem > 0 {
-		val := unpackLELong(bitmapContent[len(bitmapContent)-4:])
-		switch val {
-		case 3:
-			val = val & 0xffffff00
-		case 2:
-			val = val & 0xffff0000
-		default:
-			val = val & 0xff000000
+		for _, b := range bitmapContent[length*4:] {
+			allocated += countBits(uint32(b))
 		}
-		allocated += countBits(val)
 	}
 
 	return allocated

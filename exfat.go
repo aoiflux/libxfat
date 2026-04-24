@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"strings"
 )
 
 // hasRangeForClusterData reports whether e.clusterdata has at least
@@ -23,6 +25,10 @@ func (e *ExFAT) hasRangeForClusterData(start, length int) bool {
 // GetAllocatedClusters function is experimental, it may not work correctly all the time
 // It has been tested to work correctly if used directly after parsing root entries
 func (e *ExFAT) GetAllocatedClusters() (uint32, error) {
+	if e.vbr.bitmapEntry.GetName() == "" || e.vbr.bitmapEntry.GetEntryCluster() == 0 || e.vbr.bitmapEntry.GetSize() == 0 {
+		return 0, ErrAllocationBitmapNotFound
+	}
+
 	content, err := e.vbr.readContent(e.vbr.bitmapEntry)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrEOF) {
 		return 0, err
@@ -97,7 +103,10 @@ func (e *ExFAT) ShowAllEntriesInfo(rootEntries []Entry, path string, long, simpl
 
 func (e *ExFAT) getAllEntriesInfo(entries []Entry, path, dstdir string, long, simple, extract bool) error {
 	for _, entry := range entries {
-		e.processEntry(entry, path, dstdir, extract, long, simple)
+		err := e.processEntry(entry, path, dstdir, extract, long, simple)
+		if err != nil {
+			return err
+		}
 
 		subentries, err := e.ReadDir(entry)
 		if err != nil {
@@ -115,8 +124,16 @@ func (e *ExFAT) getAllEntriesInfo(entries []Entry, path, dstdir string, long, si
 
 func (e ExFAT) processEntry(entry Entry, path, dstdir string, extract, long, simple bool) error {
 	if extract {
+		relDir := strings.Trim(path, "/\\")
+		dstpath := filepath.Join(dstdir, filepath.FromSlash(relDir), entry.name)
+
+		if entry.IsValid() && entry.IsDir() && entry.IsIndexed() {
+			return os.MkdirAll(dstpath, 0o755)
+		}
 		if entry.IsValid() && entry.IsFile() && entry.IsIndexed() {
-			dstpath := filepath.Join(dstdir, entry.name)
+			if err := os.MkdirAll(filepath.Dir(dstpath), 0o755); err != nil {
+				return err
+			}
 			err := e.ExtractEntryContent(entry, dstpath)
 			if err != nil {
 				return err

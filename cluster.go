@@ -7,6 +7,18 @@ import (
 	"os"
 )
 
+func isEOFCluster(cluster uint32) bool {
+	cluster &= EXFAT_CLUSTER_MASK
+	return cluster >= EXFAT_EOF_START && cluster <= EXFAT_EOF_END
+}
+
+func (v *VBR) isValidCluster(cluster uint32) bool {
+	if cluster < uint32(FIRST_CLUSTER_NUMBER) {
+		return false
+	}
+	return uint64(cluster) <= uint64(v.nbClusters)+FIRST_CLUSTER_NUMBER-1
+}
+
 func (v *VBR) getClusterOffset(cluster uint32) uint64 {
 	clusterNumber := uint64(cluster) - FIRST_CLUSTER_NUMBER
 	offset := v.dataAreaStart + clusterNumber*v.clusterSize
@@ -14,15 +26,21 @@ func (v *VBR) getClusterOffset(cluster uint32) uint64 {
 }
 
 func (v *VBR) readClusters(cluster uint32, nbcluster uint64) ([]byte, error) {
+	if nbcluster == 0 {
+		return []byte{}, nil
+	}
+	if !v.isValidCluster(cluster) {
+		return nil, fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)
+	}
+	clusterIndex := uint64(cluster) - FIRST_CLUSTER_NUMBER
+	if clusterIndex+nbcluster > uint64(v.nbClusters) {
+		return nil, fmt.Errorf("out of range: cluster=%d count=%d", cluster, nbcluster)
+	}
+
 	offset := v.getClusterOffset(cluster)
 	_, err := v.dimage.Seek(int64(offset), io.SeekStart)
 	if err != nil {
 		return nil, err
-	}
-
-	if nbcluster > uint64(v.nbClusters) {
-		errstring := fmt.Sprintf("out of range: %d", nbcluster)
-		return nil, errors.New(errstring)
 	}
 
 	clusterdata := make([]byte, v.clusterSize*nbcluster)
@@ -32,8 +50,12 @@ func (v *VBR) readClusters(cluster uint32, nbcluster uint64) ([]byte, error) {
 }
 
 func (v *VBR) nextCluster(cluster uint32) (uint32, error) {
-	fatTotal := uint64(v.fatSize) * uint64(v.sectorSize)
-	if (uint64(cluster)*4) > fatTotal || cluster < 2 {
+	if !v.isValidCluster(cluster) {
+		return 0, fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)
+	}
+
+	fatEntries := (uint64(v.fatSize) * uint64(v.sectorSize)) / 4
+	if uint64(cluster) >= fatEntries {
 		errstring := fmt.Sprintf("cluster out of fat: %d", cluster)
 		return 0, errors.New(errstring)
 	}
@@ -50,22 +72,26 @@ func (v *VBR) nextCluster(cluster uint32) (uint32, error) {
 		return 0, err
 	}
 
-	return unpackLELong(data), nil
+	nextCluster := unpackLELong(data) & EXFAT_CLUSTER_MASK
+	return nextCluster, nil
 }
 
 func (v *VBR) readClustersFat(cluster uint32) ([]byte, error) {
+	chain, err := v.getChainedClusterList(cluster)
+	if err != nil {
+		return nil, err
+	}
+	if len(chain) == 0 {
+		return []byte{}, nil
+	}
+
 	var clusterdata []byte
-	for cluster != FINAL_CLUSTER {
+	for _, cluster := range chain {
 		data, err := v.readClusters(cluster, 1)
 		if err != nil {
 			return nil, err
 		}
 		clusterdata = append(clusterdata, data...)
-
-		cluster, err = v.nextCluster(cluster)
-		if err != nil {
-			return nil, err
-		}
 	}
 	return clusterdata, nil
 }
@@ -84,6 +110,10 @@ func (v *VBR) size2Clusters(size uint64) (uint64, uint32) {
 }
 
 func (v *VBR) readContent(entry Entry) ([]byte, error) {
+	if entry.dataLen == 0 {
+		return []byte{}, nil
+	}
+
 	if entry.noFatChain {
 		sizeInClusters, _ := v.size2Clusters(entry.dataLen)
 		data, err := v.readClustersNoFat(sizeInClusters, entry.entryCluster)
@@ -129,6 +159,9 @@ func (v *VBR) extractFatChainedContent(entry Entry, dstfile *os.File) error {
 	if err != nil {
 		return err
 	}
+	if len(clusterList) == 0 {
+		return nil
+	}
 
 	allButLatestClusters := clusterList[:len(clusterList)-1]
 	for _, cluster := range allButLatestClusters {
@@ -153,6 +186,10 @@ func (v *VBR) extractFatChainedContent(entry Entry, dstfile *os.File) error {
 }
 
 func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
+	if entry.dataLen == 0 {
+		return nil, 0, nil
+	}
+
 	sizeInClusters, remainder := v.size2Clusters(entry.dataLen)
 	clusterList := getRange(entry.entryCluster, sizeInClusters)
 
@@ -180,11 +217,29 @@ func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
 
 func (v *VBR) getChainedClusterList(cluster uint32) ([]uint32, error) {
 	var clusterList []uint32
-	for cluster != FINAL_CLUSTER {
+	seen := make(map[uint32]struct{})
+	for !isEOFCluster(cluster) {
+		if !v.isValidCluster(cluster) {
+			return nil, fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)
+		}
+		if _, ok := seen[cluster]; ok {
+			return nil, fmt.Errorf("%w at cluster %d", ErrClusterChainLoop, cluster)
+		}
+		seen[cluster] = struct{}{}
 		clusterList = append(clusterList, cluster)
+		if len(clusterList) > int(v.nbClusters) {
+			return nil, fmt.Errorf("%w: chain length %d exceeds cluster count %d", ErrClusterChainLoop, len(clusterList), v.nbClusters)
+		}
+
 		nextCluster, err := v.nextCluster(cluster)
-		if err != nil && nextCluster < FINAL_CLUSTER {
+		if err != nil {
 			return nil, err
+		}
+		if nextCluster == EXFAT_BAD_CLUSTER {
+			return nil, fmt.Errorf("%w at cluster %d", ErrBadCluster, cluster)
+		}
+		if !isEOFCluster(nextCluster) && !v.isValidCluster(nextCluster) {
+			return nil, fmt.Errorf("%w: %d", ErrInvalidCluster, nextCluster)
 		}
 		cluster = nextCluster
 	}
@@ -200,6 +255,9 @@ func (v *VBR) countChainedClusters(cluster uint32) (int, error) {
 }
 
 func (v *VBR) countClusters(entry Entry) (int, error) {
+	if entry.dataLen == 0 {
+		return 0, nil
+	}
 	if entry.noFatChain {
 		sizeInClusters, _ := v.size2Clusters(entry.dataLen)
 		return int(sizeInClusters), nil

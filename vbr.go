@@ -3,6 +3,7 @@ package libxfat
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 )
@@ -69,6 +70,62 @@ func (v *VBR) parseVBRData(vbr []byte, offset uint64, optimistic bool) error {
 	v.firstFat = uint64(v.fatOffset)*uint64(v.sectorSize) + v.vbrStart
 	v.dataAreaStart = v.vbrStart + uint64(v.dataRegionOffset)*uint64(v.sectorSize)
 	v.percentInUse = vbr[EXFAT_PERCENT_USE_OFFSET]
+
+	err = v.validateLayout()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (v VBR) validateLayout() error {
+	sectorShift := uint32(0)
+	for (uint32(1) << sectorShift) < v.sectorSize {
+		sectorShift++
+	}
+
+	if v.sectorSize < 512 || v.sectorSize > 4096 || (uint32(1)<<sectorShift) != v.sectorSize {
+		return fmt.Errorf("invalid sector size: %d", v.sectorSize)
+	}
+	if sectorShift < 9 || sectorShift > 12 {
+		return fmt.Errorf("invalid sector size shift: %d", sectorShift)
+	}
+	if v.sectorsPerCluster == 0 {
+		return errors.New("invalid sectors per cluster")
+	}
+	clusterShift := uint32(0)
+	for (uint32(1) << clusterShift) < v.sectorsPerCluster {
+		clusterShift++
+	}
+	if (uint32(1) << clusterShift) != v.sectorsPerCluster {
+		return fmt.Errorf("invalid sectors per cluster: %d", v.sectorsPerCluster)
+	}
+	if sectorShift+clusterShift > 25 {
+		return fmt.Errorf("invalid cluster size: sectorShift=%d clusterShift=%d", sectorShift, clusterShift)
+	}
+	if v.volumeSize == 0 {
+		return errors.New("invalid volume size")
+	}
+	if v.fatOffset == 0 || uint64(v.fatOffset) >= v.volumeSize {
+		return fmt.Errorf("invalid FAT offset: %d", v.fatOffset)
+	}
+	if v.fatSize == 0 {
+		return errors.New("invalid FAT size")
+	}
+	if v.dataRegionOffset <= v.fatOffset+v.fatSize-1 || uint64(v.dataRegionOffset) >= v.volumeSize {
+		return fmt.Errorf("invalid data region offset: %d", v.dataRegionOffset)
+	}
+	if v.nbClusters == 0 {
+		return errors.New("invalid cluster count")
+	}
+	clusterHeapSectors := uint64(v.nbClusters) * uint64(v.sectorsPerCluster)
+	if uint64(v.dataRegionOffset)+clusterHeapSectors > v.volumeSize {
+		return fmt.Errorf("cluster heap exceeds volume: dataOffset=%d clusterHeap=%d volume=%d", v.dataRegionOffset, clusterHeapSectors, v.volumeSize)
+	}
+	if v.rootDirCluster < uint32(FIRST_CLUSTER_NUMBER) || uint64(v.rootDirCluster) > uint64(v.nbClusters)+FIRST_CLUSTER_NUMBER-1 {
+		return fmt.Errorf("invalid root directory cluster: %d", v.rootDirCluster)
+	}
 
 	return nil
 }

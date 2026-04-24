@@ -43,6 +43,7 @@ func createTestImage(t *testing.T) *os.File {
 	writeTestVBR(data)
 	writeTestFAT(data[testFatOffsetSector*testSectorSize:])
 	writeTestRootDir(data[testDataOffset*testSectorSize:])
+	writeTestBitmapData(data)
 
 	if _, err := image.Write(data); err != nil {
 		t.Fatalf("write image: %v", err)
@@ -51,6 +52,22 @@ func createTestImage(t *testing.T) *os.File {
 		t.Fatalf("rewind image: %v", err)
 	}
 
+	return image
+}
+
+func createLoopedRootDirImage(t *testing.T) *os.File {
+	t.Helper()
+
+	image := createTestImage(t)
+	writeTestFATEntry(t, image, testRootCluster, testRootCluster)
+	return image
+}
+
+func createEOFRangeRootDirImage(t *testing.T) *os.File {
+	t.Helper()
+
+	image := createTestImage(t)
+	writeTestFATEntry(t, image, testRootCluster, 0x0ffffff8)
 	return image
 }
 
@@ -91,4 +108,26 @@ func writeTestRootDir(dst []byte) {
 	dst[96] = testTexFATType
 	dst[128] = testACTType
 	// Leave the next record zeroed to terminate directory parsing.
+}
+
+func writeTestBitmapData(dst []byte) {
+	bitmapOffset := (testDataOffset + (testBitmapCluster - testRootCluster)) * testSectorSize
+	dst[bitmapOffset] = 0x05
+}
+
+func writeTestFATEntry(t *testing.T, image *os.File, cluster uint32, next uint32) {
+	t.Helper()
+
+	if _, err := image.Seek(int64(testFatOffsetSector*testSectorSize)+int64(cluster*4), 0); err != nil {
+		t.Fatalf("seek FAT entry: %v", err)
+	}
+
+	var entry [4]byte
+	binary.LittleEndian.PutUint32(entry[:], next)
+	if _, err := image.Write(entry[:]); err != nil {
+		t.Fatalf("write FAT entry: %v", err)
+	}
+	if _, err := image.Seek(0, 0); err != nil {
+		t.Fatalf("rewind image: %v", err)
+	}
 }
