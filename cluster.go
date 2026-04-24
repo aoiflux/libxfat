@@ -15,7 +15,10 @@ func (v *VBR) getClusterOffset(cluster uint32) uint64 {
 
 func (v *VBR) readClusters(cluster uint32, nbcluster uint64) ([]byte, error) {
 	offset := v.getClusterOffset(cluster)
-	v.dimage.Seek(int64(offset), io.SeekStart)
+	_, err := v.dimage.Seek(int64(offset), io.SeekStart)
+	if err != nil {
+		return nil, err
+	}
 
 	if nbcluster > uint64(v.nbClusters) {
 		errstring := fmt.Sprintf("out of range: %d", nbcluster)
@@ -23,7 +26,7 @@ func (v *VBR) readClusters(cluster uint32, nbcluster uint64) ([]byte, error) {
 	}
 
 	clusterdata := make([]byte, v.clusterSize*nbcluster)
-	_, err := v.dimage.Read(clusterdata)
+	_, err = io.ReadFull(v.dimage, clusterdata)
 
 	return clusterdata, err
 }
@@ -36,10 +39,13 @@ func (v *VBR) nextCluster(cluster uint32) (uint32, error) {
 	}
 
 	offset := int64(v.firstFat) + (int64(cluster) * 4)
-	v.dimage.Seek(offset, io.SeekStart)
+	_, err := v.dimage.Seek(offset, io.SeekStart)
+	if err != nil {
+		return 0, err
+	}
 
 	data := make([]byte, 4)
-	_, err := v.dimage.Read(data)
+	_, err = io.ReadFull(v.dimage, data)
 	if err != nil {
 		return 0, err
 	}

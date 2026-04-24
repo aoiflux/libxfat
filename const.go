@@ -78,6 +78,7 @@ const (
 	MBR         = "$MBR"
 	FAT1        = "$FAT1"
 	FAT2        = "$FAT2"
+	ORPHANFILES = "$OrphanFiles"
 	EOF         = "EOF"
 )
 

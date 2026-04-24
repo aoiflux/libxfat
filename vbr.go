@@ -11,10 +11,13 @@ func parseVBR(dimage *os.File, offset uint64, optmistic bool) (VBR, error) {
 	var vbr VBR
 
 	seekByte := int64(offset) * int64(SECTOR_SIZE)
-	dimage.Seek(seekByte, io.SeekStart)
+	_, err := dimage.Seek(seekByte, io.SeekStart)
+	if err != nil {
+		return vbr, err
+	}
 
 	data := make([]byte, VBR_SIZE*SECTOR_SIZE)
-	_, err := dimage.Read(data)
+	_, err = io.ReadFull(dimage, data)
 	if err != nil {
 		return vbr, err
 	}

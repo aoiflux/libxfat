@@ -200,6 +200,11 @@ func (e *ExFAT) ReadRootDir() ([]Entry, error) {
 		return nil, err
 	}
 	entries := e.parseDir(clusterdata)
+
+	// Add virtual entries for filesystem metadata (like SleuthKit does)
+	virtualEntries := e.createVirtualEntries()
+	entries = append(entries, virtualEntries...)
+
 	return entries, nil
 }
 
@@ -448,4 +453,42 @@ func (e *ExFAT) populateDirRecordStreamSeen() {
 	}
 
 	e.remainingSC--
+}
+
+// createVirtualEntries creates virtual/special entries representing filesystem metadata
+// These entries are similar to what SleuthKit's FLS shows for exFAT filesystems
+func (e *ExFAT) createVirtualEntries() []Entry {
+	var virtualEntries []Entry
+
+	// $MBR virtual entry - represents the Master Boot Record / VBR
+	mbrEntry := Entry{
+		etype:      0xFF, // Virtual entry type
+		name:       MBR,
+		dataLen:    uint64(VBR_SIZE * SECTOR_SIZE),
+		entryAttr:  ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
+		noFatChain: true,
+	}
+	virtualEntries = append(virtualEntries, mbrEntry)
+
+	// $FAT1 virtual entry - represents the first FAT
+	fat1Entry := Entry{
+		etype:      0xFF, // Virtual entry type
+		name:       FAT1,
+		dataLen:    uint64(e.vbr.fatSize) * uint64(e.vbr.sectorSize),
+		entryAttr:  ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
+		noFatChain: true,
+	}
+	virtualEntries = append(virtualEntries, fat1Entry)
+
+	// $OrphanFiles virtual directory - represents orphaned/unlinked files
+	orphanEntry := Entry{
+		etype:      0xFF, // Virtual entry type
+		name:       ORPHANFILES,
+		dataLen:    0,
+		entryAttr:  ENTRY_ATTR_DIR_MASK | ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
+		noFatChain: true,
+	}
+	virtualEntries = append(virtualEntries, orphanEntry)
+
+	return virtualEntries
 }

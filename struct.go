@@ -52,17 +52,21 @@ type Entry struct {
 }
 
 func (e Entry) IsInvalid() bool {
-	return !e.IsValid() || e.IsSpecialFile()
+	return !e.IsValid() || (e.IsSpecialFile() && !e.IsVirtualEntry())
 }
 func (e Entry) IsValid() bool {
-	return e.etype == EXFAT_DIRRECORD_FILEDIR
+	return e.etype == EXFAT_DIRRECORD_FILEDIR || e.IsVirtualEntry()
+}
+func (e Entry) IsVirtualEntry() bool {
+	// Virtual entries created for filesystem metadata (like $MBR, $FAT1, $OrphanFiles)
+	return e.name == MBR || e.name == FAT1 || e.name == FAT2 || e.name == ORPHANFILES
 }
 func (e Entry) IsBitmapUpcase() bool {
 	return e.name == BITMAP || e.name == UPCASE || e.etype == EXFAT_DIRRECORD_BITMAP || e.etype == EXFAT_DIRRECORD_UPCASE
 }
 func (e Entry) IsSpecialFile() bool {
-	// Check if entry is a special/metadata file (bitmap, upcase, volume GUID, TexFAT, ACT)
-	if e.IsBitmapUpcase() {
+	// Check if entry is a special/metadata file (bitmap, upcase, volume GUID, TexFAT, ACT, or virtual entries)
+	if e.IsBitmapUpcase() || e.IsVirtualEntry() {
 		return true
 	}
 	return e.name == VOLUME_GUID || e.name == TEXFAT || e.name == ACT ||
@@ -105,6 +109,10 @@ func (e Entry) HasNoName() bool {
 	return ename == ""
 }
 func (e Entry) NonParsable() bool {
+	// Virtual entries (like $MBR, $FAT1, $OrphanFiles) should not be recursively parsed
+	if e.IsVirtualEntry() {
+		return true
+	}
 	return e.IsDeleted() || e.IsFile() || e.IsInvalid() || e.HasNoName()
 }
 
@@ -119,11 +127,11 @@ type ExFAT struct {
 	dirtype      byte
 	optimistic   bool
 	// Parsing state for filename/checksum assembly
-	setChecksum     uint16
+	setChecksum      uint16
 	expectedChecksum uint16
-	expectedSC      int
-	expectedNameLen int
-	nameUnits       []uint16
+	expectedSC       int
+	expectedNameLen  int
+	nameUnits        []uint16
 }
 
 func New(imagefile *os.File, optimistic bool, offset ...uint64) (ExFAT, error) {
