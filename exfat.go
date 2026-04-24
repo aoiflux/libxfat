@@ -225,6 +225,62 @@ func (e *ExFAT) ReadRootDir() ([]Entry, error) {
 	return entries, nil
 }
 
+// RecoverDeletedEntries scans unallocated clusters and attempts to parse
+// deleted exFAT file entry sets (0x05/0x40/0x41), similar to TSK-style
+// orphan/deleted discovery.
+func (e *ExFAT) RecoverDeletedEntries() ([]Entry, error) {
+	unallocated, err := e.getUnallocatedClusters()
+	if err != nil {
+		return nil, err
+	}
+
+	var deleted []Entry
+	for _, cluster := range unallocated {
+		clusterdata, err := e.vbr.readClusters(cluster, 1)
+		if err != nil {
+			return nil, err
+		}
+		deleted = append(deleted, e.parseDeletedDirEntries(clusterdata)...)
+	}
+
+	return deleted, nil
+}
+
+func (e *ExFAT) getUnallocatedClusters() ([]uint32, error) {
+	if e.vbr.bitmapEntry.GetName() == "" || e.vbr.bitmapEntry.GetEntryCluster() == 0 || e.vbr.bitmapEntry.GetSize() == 0 {
+		if _, err := e.ReadRootDir(); err != nil {
+			return nil, err
+		}
+	}
+
+	if e.vbr.bitmapEntry.GetName() == "" || e.vbr.bitmapEntry.GetEntryCluster() == 0 || e.vbr.bitmapEntry.GetSize() == 0 {
+		return nil, ErrAllocationBitmapNotFound
+	}
+
+	bitmapContent, err := e.vbr.readContent(e.vbr.bitmapEntry)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrEOF) {
+		return nil, err
+	}
+
+	var unallocated []uint32
+	for i := uint32(0); i < e.vbr.nbClusters; i++ {
+		byteIndex := i / 8
+		bitMask := byte(1 << (i % 8))
+
+		allocated := false
+		if int(byteIndex) < len(bitmapContent) {
+			allocated = (bitmapContent[byteIndex] & bitMask) != 0
+		}
+
+		if !allocated {
+			cluster := uint32(FIRST_CLUSTER_NUMBER) + i
+			unallocated = append(unallocated, cluster)
+		}
+	}
+
+	return unallocated, nil
+}
+
 func (e *ExFAT) CountClusters(entry Entry) (int, error) {
 	return e.vbr.countClusters(entry)
 }
@@ -378,6 +434,106 @@ func (e *ExFAT) parseDir(clusterdata []byte) []Entry {
 	return entries
 }
 
+func (e *ExFAT) parseDeletedDirEntries(clusterdata []byte) []Entry {
+	var entries []Entry
+	e.initEntryState(clusterdata, 0, 0, ENTRY_STATE_START)
+	e.setChecksum = 0
+	e.expectedChecksum = 0
+	e.expectedSC = 0
+	e.expectedNameLen = 0
+	e.nameUnits = nil
+
+	for e.offset+EXFAT_DIRRECORD_SIZE <= len(clusterdata) {
+		e.dirtype = clusterdata[e.offset]
+
+		if e.dirtype == 0 {
+			e.offset += EXFAT_DIRRECORD_SIZE
+			continue
+		}
+
+		rec := clusterdata[e.offset : e.offset+EXFAT_DIRRECORD_SIZE]
+
+		if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
+			if e.validateFileDentry(rec) {
+				e.setChecksum = exfatDirSetChecksumAdd(0, rec, true)
+				e.populateDirRecordDel()
+				e.expectedSC = int(e.entry.secondaryCount)
+				b0 := uint16(rec[2])
+				b1 := uint16(rec[3])
+				e.expectedChecksum = b0 | (b1 << 8)
+				e.expectedNameLen = 0
+				e.nameUnits = nil
+			}
+			e.offset += EXFAT_DIRRECORD_SIZE
+			continue
+		}
+
+		if (e.dirtype&0x7f) == EXFAT_DIRRECORD_DEL_STREAM_EXT && e.entryState == ENTRY_STATE_85_SEEN {
+			if e.validateFileStreamDentry(rec) {
+				e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec, false)
+				e.populateDirRecordStreamSeen()
+				e.expectedNameLen = int(e.entry.nameLen)
+			}
+			e.offset += EXFAT_DIRRECORD_SIZE
+			continue
+		}
+
+		if (e.dirtype&0x7f) == EXFAT_DIRRECORD_DEL_FILENAME_EXT && e.entryState == ENTRY_STATE_85_SEEN {
+			if e.validateFileNameDentry(rec) {
+				e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec, false)
+				raw := rec[2:EXFAT_DIRRECORD_SIZE]
+				units := utf16leUnitsFromBytes(raw, 15)
+				e.nameUnits = append(e.nameUnits, units...)
+
+				if e.remainingSC >= 1 {
+					e.remainingSC--
+					if e.remainingSC == 0 {
+						if e.expectedNameLen > 0 && len(e.nameUnits) > e.expectedNameLen {
+							e.nameUnits = e.nameUnits[:e.expectedNameLen]
+						}
+						checksumOK := (e.expectedChecksum == e.setChecksum)
+						if e.optimistic || checksumOK {
+							e.entry.name = utf16UnitsToString(e.nameUnits)
+						} else {
+							e.entry.name = ""
+						}
+						if e.entry.IsDeleted() {
+							e.entry.name += DELETED
+						}
+						entries = append(entries, e.entry)
+
+						e.entry = Entry{}
+						e.entryState = ENTRY_STATE_START
+						e.remainingSC = 0
+						e.setChecksum = 0
+						e.expectedChecksum = 0
+						e.expectedSC = 0
+						e.expectedNameLen = 0
+						e.nameUnits = nil
+					}
+				}
+			}
+			e.offset += EXFAT_DIRRECORD_SIZE
+			continue
+		}
+
+		if e.entryState == ENTRY_STATE_85_SEEN {
+			e.entry = Entry{}
+			e.entryState = ENTRY_STATE_START
+			e.remainingSC = 0
+			e.setChecksum = 0
+			e.expectedChecksum = 0
+			e.expectedSC = 0
+			e.expectedNameLen = 0
+			e.nameUnits = nil
+		}
+
+		e.offset += EXFAT_DIRRECORD_SIZE
+	}
+
+	return entries
+}
+
 func (e *ExFAT) populateDirRecordLabel() {
 	count := int(e.clusterdata[e.offset+1])
 	startOffset := e.offset + 2
@@ -449,7 +605,8 @@ func (e *ExFAT) populateDirRecordDel() {
 	e.entry.created10ms = e.clusterdata[e.offset+20]
 	e.entry.modified10ms = e.clusterdata[e.offset+21]
 	e.remainingSC = int(e.entry.secondaryCount)
-	if e.dirtype == EXFAT_DIRRECORD_FILEDIR {
+	// Both 0x85 (allocated) and 0x05 (deleted) begin a file entry set.
+	if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
 		e.entryState = ENTRY_STATE_85_SEEN
 	}
 }

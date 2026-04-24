@@ -26,8 +26,8 @@ The `extract-all` example also requires:
 
 - `list-root`: open an image and print root directory entries, including
   metadata and virtual entries.
-- `list-all`: walk the full filesystem and print every reachable indexable entry
-  with its full path.
+- `list-all`: walk the full filesystem and print reachable files and directories
+  with full paths.
 - `volume-stats`: parse the root directory and report volume label, cluster
   size, used space, allocation counts, and metadata entry totals.
 - `extract-all`: extract all regular files reachable from the root directory

@@ -108,6 +108,10 @@ fs, err := libxfat.New(imageFile, false, 2048)
 - `ExtractEntryContent(entry Entry, dstpath string) error`
 - `ExtractAllFiles(rootEntries []Entry, dstdir string) error`
 
+### Deleted Entry Recovery
+
+- `RecoverDeletedEntries() ([]Entry, error)`
+
 ### Volume Statistics
 
 - `GetVolumeLabel() string`

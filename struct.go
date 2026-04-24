@@ -100,7 +100,7 @@ func (e Entry) IsIndexed() bool {
 	return !e.IsDeleted()
 }
 func (e Entry) IsDeleted() bool {
-	return e.entryCluster == ZERO_ENTRY_CLUSTER || e.etype == EXFAT_DIRRECORD_DEL_FILEDIR
+	return entryTypeNormal(e.etype) == (EXFAT_DIRRECORD_FILEDIR&0x7F) && !entryInUse(e.etype)
 }
 func (e Entry) HasNoName() bool {
 	ename := strings.TrimSpace(e.name)
