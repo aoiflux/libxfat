@@ -10,10 +10,12 @@ func IsEntryTypeValidRecord(etype byte) bool {
 }
 
 func countBitmap(bitmapContent []byte) uint32 {
-	length := len(bitmapContent) / 4
-	rem := len(bitmapContent) % 4
-	var allocated uint32
+	counter := bitmapCounter{}
+	counter.write(bitmapContent)
+	return counter.count()
+}
 
+<<<<<<< Updated upstream
 	for i := range length {
 		allocated += countBits(unpackLELong(bitmapContent[i*4 : (i+1)*4]))
 	}
@@ -22,9 +24,46 @@ func countBitmap(bitmapContent []byte) uint32 {
 		for _, b := range bitmapContent[length*4:] {
 			allocated += countBits(uint32(b))
 		}
+=======
+type bitmapCounter struct {
+	tail    [4]byte
+	tailLen int
+	total   uint32
+}
+
+func (c *bitmapCounter) write(chunk []byte) {
+	if c.tailLen > 0 {
+		need := 4 - c.tailLen
+		if len(chunk) < need {
+			copy(c.tail[c.tailLen:], chunk)
+			c.tailLen += len(chunk)
+			return
+		}
+		copy(c.tail[c.tailLen:], chunk[:need])
+		c.total += countBits(unpackLELong(c.tail[:]))
+		c.tailLen = 0
+		chunk = chunk[need:]
+>>>>>>> Stashed changes
 	}
 
-	return allocated
+	for len(chunk) >= 4 {
+		c.total += countBits(unpackLELong(chunk[:4]))
+		chunk = chunk[4:]
+	}
+
+	if len(chunk) > 0 {
+		copy(c.tail[:], chunk)
+		c.tailLen = len(chunk)
+	}
+}
+
+func (c *bitmapCounter) count() uint32 {
+	if c.tailLen == 0 {
+		return c.total
+	}
+	var padded [4]byte
+	copy(padded[:], c.tail[:c.tailLen])
+	return c.total + countBits(unpackLELong(padded[:]))
 }
 
 func countBits(bitn uint32) uint32 {

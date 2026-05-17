@@ -22,8 +22,93 @@ The library is read-oriented. It does not create or modify exFAT volumes.
 
 ## Install
 
-```bash
-go get github.com/aoiflux/libxfat
+<!-- default option, no dependency badges. -->
+
+<!-- default option, no dependency badges. -->
+
+</div>
+<br>
+
+---
+
+## Table of Contents
+
+- [Table of Contents](#table-of-contents)
+- [Overview](#overview)
+- [Features](#features)
+- [Project Structure](#project-structure)
+  - [Project Index](#project-index)
+- [Internal Parsing Notes](#internal-parsing-notes)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+- [Contributing](#contributing)
+- [Cite Paper](#cite)
+- [Read Paper](#paper)
+
+---
+
+## Overview
+
+libxfat is a Go library offering a robust and efficient solution for parsing and
+manipulating ExFAT filesystems. It provides comprehensive tools for extracting
+data and accessing metadata.
+
+**Why libxfat?**
+
+This project simplifies ExFAT filesystem interaction for developers. The core
+features include:
+
+- **🟢 Robust ExFAT Parsing:** Handles both contiguous and chained cluster
+  allocation schemes for reliable data extraction.
+- **🔵 Comprehensive Metadata Access:** Easily retrieve file size, attributes,
+  timestamps, and generate directory listings.
+- **🟡 Efficient Data Extraction:** Optimized for speed and performance when
+  working with large ExFAT volumes.
+- **🔴 Clear Data Structures:** Well-defined structs (VBR, Entry) simplify ExFAT
+  data manipulation and understanding.
+- **🟣 Thorough Error Handling:** Includes integrity checks and robust error
+  handling to prevent data loss.
+- **🟠 Well-Documented Code:** Clean, well-commented code ensures easy
+  integration and maintainability.
+
+## Internal Parsing Notes
+
+The internal parser architecture and zero-copy boundaries are documented in
+[INTERNAL_PARSING.md](./INTERNAL_PARSING.md).
+
+---
+
+## Features
+
+|    | Component         | Details                                                                                                                                                                                |
+| :- | :---------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ⚙️ | **Architecture**  | <ul><li>Pure Go implementation</li><li>Modular design with separate packages for different FAT functionalities</li></ul>                                                               |
+| 🔩 | **Code Quality**  | <ul><li>Generally well-structured code</li><li>Uses descriptive variable and function names</li><li>Some areas could benefit from more comments</li></ul>                              |
+| 📄 | **Documentation** | <ul><li>Limited documentation</li><li>Relies heavily on code comments for explanation</li><li>No formal API documentation</li></ul>                                                    |
+| 🔌 | **Integrations**  | <ul><li>Designed to be easily integrated into other Go projects</li><li>No external library dependencies beyond Go's standard library</li></ul>                                        |
+| 🧩 | **Modularity**    | <ul><li>Good modularity with distinct packages for file system operations, directory handling, etc.</li><li>Facilitates independent testing and maintainability</li></ul>              |
+| ⚡️ | **Performance**   | <ul><li>Performance not explicitly optimized in the code</li><li>Further analysis required to determine performance characteristics</li></ul>                                          |
+| 🛡️ | **Security**      | <ul><li>No explicit security measures implemented (e.g., input validation)</li><li>Security considerations need to be addressed for production use</li></ul>                           |
+| 📦 | **Dependencies**  | <ul><li>Only relies on the Go standard library</li><li>No external dependencies, reducing complexity and potential conflicts</li></ul>                                                 |
+| 🚀 | **Scalability**   | <ul><li>Scalability depends on the application using the library</li><li>The library itself is not inherently limited in scalability</li><li>Tested with datasets up to 1TiB</li></ul> |
+
+---
+
+## Project Structure
+
+```sh
+└── libxfat/
+    ├── README.md
+    ├── cluster.go
+    ├── const.go
+    ├── entry.go
+    ├── exfat.go
+    ├── go.mod
+    ├── go.sum
+    ├── struct.go
+    ├── util.go
+    └── vbr.go
 ```
 
 The module currently targets Go 1.25 as declared in `go.mod`.
@@ -230,6 +315,12 @@ See `IMPROVEMENTS.md` for a more detailed implementation summary.
 
 ## Contributing
 
+- **🐛 [Report Issues](https://github.com/aoiflux/libxfat/issues)**: Submit bugs
+  found or log feature requests for the `libxfat` project.
+- **💡
+  [Submit Pull Requests](https://github.com/aoiflux/libxfat/blob/main/CONTRIBUTING.md)**:
+  Review open PRs, and submit your own PRs.
+
 Issues and pull requests are welcome. If you change parsing behavior, prefer
 adding or updating tests in the same change so malformed-image handling and
 metadata behavior remain covered.
@@ -237,7 +328,8 @@ metadata behavior remain covered.
 ## Citation
 
 Gogia, G., & Rughani, P. (2024). Parex: A novel exfat parser for file system
-forensics. Computacion y Sistemas, 28(2). https://doi.org/10.13053/cys-28-2-4804
+forensics. Computación y Sistemas, 28(2). https://doi.org/10.13053/cys-28-2-4804
 
-Paper:
-https://www.scielo.org.mx/scielo.php?script=sci_arttext&pid=S1405-55462024000200421
+## Paper
+
+## [PAREX: A Novel exFAT Parser for File System Forensics](https://www.scielo.org.mx/scielo.php?script=sci_arttext&pid=S1405-55462024000200421#:~:text=This%20research%20proposes%20a%20novel%20open-source%20exFAT%20file,of%20disk%20images%20ranging%20from%201MiB%20to%201TiB)
