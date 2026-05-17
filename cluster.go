@@ -7,10 +7,19 @@ import (
 	"os"
 )
 
+var errStopClusterWalk = errors.New("stop cluster walk")
+
 func (v *VBR) getClusterOffset(cluster uint32) uint64 {
 	clusterNumber := uint64(cluster) - FIRST_CLUSTER_NUMBER
 	offset := v.dataAreaStart + clusterNumber*v.clusterSize
 	return offset
+}
+
+func (v *VBR) isValidCluster(cluster uint32) bool {
+	if cluster < uint32(FIRST_CLUSTER_NUMBER) {
+		return false
+	}
+	return uint64(cluster) < uint64(v.nbClusters)+FIRST_CLUSTER_NUMBER
 }
 
 func (v *VBR) readClusters(cluster uint32, nbcluster uint64) ([]byte, error) {
@@ -26,11 +35,9 @@ func (v *VBR) readClusters(cluster uint32, nbcluster uint64) ([]byte, error) {
 	}
 
 	offset := v.getClusterOffset(cluster)
-	v.dimage.Seek(int64(offset), io.SeekStart)
-
-	if nbcluster > uint64(v.nbClusters) {
-		errstring := fmt.Sprintf("out of range: %d", nbcluster)
-		return nil, errors.New(errstring)
+	_, err := v.dimage.Seek(int64(offset), io.SeekStart)
+	if err != nil {
+		return nil, err
 	}
 
 	clusterdata := make([]byte, v.clusterSize*nbcluster)
@@ -46,8 +53,7 @@ func (v *VBR) nextCluster(cluster uint32) (uint32, error) {
 
 	fatEntries := (uint64(v.fatSize) * uint64(v.sectorSize)) / 4
 	if uint64(cluster) >= fatEntries {
-		errstring := fmt.Sprintf("cluster out of fat: %d", cluster)
-		return 0, errors.New(errstring)
+		return 0, fmt.Errorf("cluster out of fat: %d", cluster)
 	}
 
 	offset := int64(v.firstFat) + (int64(cluster) * 4)
@@ -63,21 +69,89 @@ func (v *VBR) nextCluster(cluster uint32) (uint32, error) {
 	}
 
 	nextCluster := unpackLELong(data) & EXFAT_CLUSTER_MASK
+	if nextCluster == EXFAT_BAD_CLUSTER {
+		return 0, ErrBadCluster
+	}
 	return nextCluster, nil
 }
 
-func (v *VBR) readClustersFat(cluster uint32) ([]byte, error) {
-	var clusterdata []byte
-	for cluster != FINAL_CLUSTER {
-		data, err := v.readClusters(cluster, 1)
-		if err != nil {
+func (v *VBR) readClusterInto(cluster uint32, buf []byte) error {
+	if uint64(len(buf)) != v.clusterSize {
+		return fmt.Errorf("invalid cluster buffer size: got %d want %d", len(buf), v.clusterSize)
+	}
+	if !v.isValidCluster(cluster) {
+		return fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)
+	}
+
+	offset := v.getClusterOffset(cluster)
+	_, err := v.dimage.Seek(int64(offset), io.SeekStart)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.ReadFull(v.dimage, buf)
+	return err
+}
+
+func (v *VBR) visitContiguousClusters(start uint32, count uint64, visitor func(cluster uint32, data []byte) error) error {
+	if count == 0 {
+		return nil
+	}
+
+	buf := make([]byte, v.clusterSize)
+	cluster := start
+	for i := uint64(0); i < count; i++ {
+		if err := v.readClusterInto(cluster, buf); err != nil {
 			return err
 		}
-		cluster = nextCluster
-		visited++
+		if err := visitor(cluster, buf); err != nil {
+			return err
+		}
+		cluster++
 	}
 
 	return nil
+}
+
+func (v *VBR) visitFatChain(start uint32, visitor func(cluster uint32, data []byte) error) error {
+	if !v.isValidCluster(start) {
+		return fmt.Errorf("%w: %d", ErrInvalidCluster, start)
+	}
+
+	buf := make([]byte, v.clusterSize)
+	seen := make(map[uint32]struct{})
+	cluster := start
+	visited := uint32(0)
+
+	for {
+		if !v.isValidCluster(cluster) {
+			return fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)
+		}
+		if _, ok := seen[cluster]; ok {
+			return ErrClusterChainLoop
+		}
+		seen[cluster] = struct{}{}
+		if visited >= v.nbClusters {
+			return ErrClusterChainLoop
+		}
+
+		if err := v.readClusterInto(cluster, buf); err != nil {
+			return err
+		}
+		if err := visitor(cluster, buf); err != nil {
+			return err
+		}
+
+		nextCluster, err := v.nextCluster(cluster)
+		if err != nil {
+			return err
+		}
+		visited++
+		if nextCluster >= EXFAT_EOF_START && nextCluster <= EXFAT_EOF_END {
+			return nil
+		}
+		cluster = nextCluster
+	}
 }
 
 func (v *VBR) visitEntryData(entry Entry, visitor func(cluster uint32, data []byte) error) error {
@@ -117,23 +191,6 @@ func (v *VBR) visitEntryData(entry Entry, visitor func(cluster uint32, data []by
 	return err
 }
 
-func (v *VBR) readClustersFat(cluster uint32) ([]byte, error) {
-	var clusterdata []byte
-	err := v.visitFatChain(cluster, func(_ uint32, data []byte) error {
-		clusterdata = append(clusterdata, data...)
-
-		cluster, err = v.nextCluster(cluster)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return clusterdata, nil
-}
-
-func (v *VBR) readClustersNoFat(sizeInClusters uint64, cluster uint32) ([]byte, error) {
-	return v.readClusters(cluster, sizeInClusters)
-}
-
 func (v *VBR) size2Clusters(size uint64) (uint64, uint32) {
 	sizeInClusters := size / v.clusterSize
 	remainder := size % v.clusterSize
@@ -141,23 +198,6 @@ func (v *VBR) size2Clusters(size uint64) (uint64, uint32) {
 		sizeInClusters++
 	}
 	return sizeInClusters, uint32(remainder)
-}
-
-func (v *VBR) readContent(entry Entry) ([]byte, error) {
-	if entry.noFatChain {
-		sizeInClusters, _ := v.size2Clusters(entry.dataLen)
-		data, err := v.readClustersNoFat(sizeInClusters, entry.entryCluster)
-		if err != nil {
-			return nil, err
-		}
-		return data[:entry.dataLen], nil
-	}
-
-	data, err := v.readClustersFat(entry.entryCluster)
-	if err != nil {
-		return nil, err
-	}
-	return data[:offset], nil
 }
 
 func (v *VBR) extractEntryContent(entry Entry, dstpath string) error {
@@ -188,28 +228,7 @@ func (v *VBR) extractFatChainedContent(entry Entry, dstfile *os.File) error {
 	return v.visitEntryData(entry, func(_ uint32, chunk []byte) error {
 		_, err := dstfile.Write(chunk)
 		return err
-	}
-
-	allButLatestClusters := clusterList[:len(clusterList)-1]
-	for _, cluster := range allButLatestClusters {
-		data, err := v.readClusters(cluster, 1)
-		if err != nil {
-			return err
-		}
-		_, err = dstfile.Write(data)
-		if err != nil {
-			return err
-		}
-	}
-
-	latestCluster := clusterList[len(clusterList)-1]
-	data, err := v.readClusters(latestCluster, 1)
-	if err != nil {
-		return err
-	}
-
-	_, err = dstfile.Write(data[:filetail])
-	return err
+	})
 }
 
 func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
@@ -244,13 +263,12 @@ func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
 
 func (v *VBR) getChainedClusterList(cluster uint32) ([]uint32, error) {
 	var clusterList []uint32
-	for cluster != FINAL_CLUSTER {
+	err := v.visitFatChain(cluster, func(cluster uint32, _ []byte) error {
 		clusterList = append(clusterList, cluster)
-		nextCluster, err := v.nextCluster(cluster)
-		if err != nil && nextCluster < FINAL_CLUSTER {
-			return nil, err
-		}
-		cluster = nextCluster
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return clusterList, nil
 }

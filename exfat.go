@@ -9,22 +9,47 @@ import (
 	"strings"
 )
 
-// hasRangeForClusterData reports whether e.clusterdata has at least
-// length bytes starting from start. It avoids panics when parsing
-// partially available cluster buffers.
-func (e *ExFAT) hasRangeForClusterData(start, length int) bool {
-	if e.clusterdata == nil {
-		return false
+func (e *ExFAT) hasBitmapEntry() bool {
+	return e.vbr.bitmapEntry.GetName() != "" && e.vbr.bitmapEntry.GetEntryCluster() != 0 && e.vbr.bitmapEntry.GetSize() != 0
+}
+
+func (e *ExFAT) ensureBitmapEntry() error {
+	if e.hasBitmapEntry() {
+		return nil
 	}
-	if start < 0 || length < 0 {
-		return false
+	if e.vbr.dimage != nil && e.vbr.rootDirCluster != 0 {
+		if _, err := e.ReadRootDir(); err != nil {
+			return err
+		}
 	}
-	return start+length <= len(e.clusterdata)
+	if !e.hasBitmapEntry() {
+		return ErrAllocationBitmapNotFound
+	}
+	return nil
+}
+
+func (e *ExFAT) resetSetAssembly() {
+	e.setChecksum = 0
+	e.expectedChecksum = 0
+	e.expectedSC = 0
+	e.expectedNameLen = 0
+	e.nameUnits = nil
+}
+
+func (e *ExFAT) clearParsedEntry() {
+	e.entry = Entry{}
+	e.entryState = ENTRY_STATE_START
+	e.remainingSC = 0
+	e.resetSetAssembly()
 }
 
 // GetAllocatedClusters function is experimental, it may not work correctly all the time
 // It has been tested to work correctly if used directly after parsing root entries
 func (e *ExFAT) GetAllocatedClusters() (uint32, error) {
+	if err := e.ensureBitmapEntry(); err != nil {
+		return 0, ErrAllocationBitmapNotFound
+	}
+
 	counter := bitmapCounter{}
 	err := e.vbr.visitEntryData(e.vbr.bitmapEntry, func(_ uint32, chunk []byte) error {
 		counter.write(chunk)
@@ -127,20 +152,16 @@ func (e ExFAT) processEntry(entry Entry, path, dstdir string, extract, long, sim
 		relDir := strings.Trim(path, "/\\")
 		dstpath := filepath.Join(dstdir, filepath.FromSlash(relDir), entry.name)
 
-		if entry.IsValid() && entry.IsDir() && entry.IsIndexed() {
+		if !entry.IsValid() || !entry.IsIndexed() {
+			return nil
+		}
+		if entry.IsDir() {
 			return os.MkdirAll(dstpath, 0o755)
 		}
-		if entry.IsValid() && entry.IsFile() && entry.IsIndexed() {
-			if err := os.MkdirAll(filepath.Dir(dstpath), 0o755); err != nil {
-				return err
-			}
-			err := e.ExtractEntryContent(entry, dstpath)
-			if err != nil {
-				return err
-			}
+		if err := os.MkdirAll(filepath.Dir(dstpath), 0o755); err != nil {
+			return err
 		}
-
-		return nil
+		return e.ExtractEntryContent(entry, dstpath)
 	}
 
 	entryString := getDirEntry(entry, path, long, simple)
@@ -212,7 +233,12 @@ func (e *ExFAT) ReadDir(entry Entry) ([]Entry, error) {
 }
 
 func (e *ExFAT) ReadRootDir() ([]Entry, error) {
-	return e.readRootDirEntries()
+	entries, err := e.readRootDirEntries()
+	if err != nil {
+		return nil, err
+	}
+	entries = append(entries, e.createVirtualEntries()...)
+	return entries, nil
 }
 
 // RecoverDeletedEntries scans unallocated clusters and attempts to parse
@@ -237,35 +263,32 @@ func (e *ExFAT) RecoverDeletedEntries() ([]Entry, error) {
 }
 
 func (e *ExFAT) getUnallocatedClusters() ([]uint32, error) {
-	if e.vbr.bitmapEntry.GetName() == "" || e.vbr.bitmapEntry.GetEntryCluster() == 0 || e.vbr.bitmapEntry.GetSize() == 0 {
-		if _, err := e.ReadRootDir(); err != nil {
-			return nil, err
-		}
-	}
-
-	if e.vbr.bitmapEntry.GetName() == "" || e.vbr.bitmapEntry.GetEntryCluster() == 0 || e.vbr.bitmapEntry.GetSize() == 0 {
-		return nil, ErrAllocationBitmapNotFound
-	}
-
-	bitmapContent, err := e.vbr.readContent(e.vbr.bitmapEntry)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrEOF) {
+	if err := e.ensureBitmapEntry(); err != nil {
 		return nil, err
 	}
 
 	var unallocated []uint32
-	for i := uint32(0); i < e.vbr.nbClusters; i++ {
-		byteIndex := i / 8
-		bitMask := byte(1 << (i % 8))
-
-		allocated := false
-		if int(byteIndex) < len(bitmapContent) {
-			allocated = (bitmapContent[byteIndex] & bitMask) != 0
+	clusterIndex := uint32(0)
+	err := e.vbr.visitEntryData(e.vbr.bitmapEntry, func(_ uint32, chunk []byte) error {
+		for _, b := range chunk {
+			for bit := 0; bit < 8 && clusterIndex < e.vbr.nbClusters; bit++ {
+				allocated := (b & (1 << bit)) != 0
+				if !allocated {
+					unallocated = append(unallocated, uint32(FIRST_CLUSTER_NUMBER)+clusterIndex)
+				}
+				clusterIndex++
+			}
+			if clusterIndex >= e.vbr.nbClusters {
+				return errStopClusterWalk
+			}
 		}
-
-		if !allocated {
-			cluster := uint32(FIRST_CLUSTER_NUMBER) + i
-			unallocated = append(unallocated, cluster)
-		}
+		return nil
+	})
+	if errors.Is(err, errStopClusterWalk) {
+		return unallocated, nil
+	}
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrEOF) {
+		return nil, err
 	}
 
 	return unallocated, nil
@@ -290,40 +313,38 @@ func (e *ExFAT) GetUsedSpace() string {
 
 func (e *ExFAT) resetDirParser() {
 	e.initEntryState(nil, 0, 0, ENTRY_STATE_START)
-	e.setChecksum = 0
-	e.expectedChecksum = 0
-	e.expectedSC = 0
-	e.expectedNameLen = 0
-	e.nameUnits = nil
+	e.resetSetAssembly()
 }
 
 func (e *ExFAT) readDirEntries(entry Entry) ([]Entry, error) {
 	var entries []Entry
+	done := false
 	e.resetDirParser()
 	err := e.vbr.visitEntryData(entry, func(_ uint32, chunk []byte) error {
+		if done {
+			return nil
+		}
 		if e.parseDirChunk(chunk, &entries) {
-			return errStopClusterWalk
+			done = true
 		}
 		return nil
 	})
-	if errors.Is(err, errStopClusterWalk) {
-		return entries, nil
-	}
 	return entries, err
 }
 
 func (e *ExFAT) readRootDirEntries() ([]Entry, error) {
 	var entries []Entry
+	done := false
 	e.resetDirParser()
 	err := e.vbr.visitFatChain(e.vbr.rootDirCluster, func(_ uint32, chunk []byte) error {
+		if done {
+			return nil
+		}
 		if e.parseDirChunk(chunk, &entries) {
-			return errStopClusterWalk
+			done = true
 		}
 		return nil
 	})
-	if errors.Is(err, errStopClusterWalk) {
-		return entries, nil
-	}
 	return entries, err
 }
 
@@ -331,6 +352,77 @@ func (e *ExFAT) parseDir(clusterdata []byte) []Entry {
 	var entries []Entry
 	e.resetDirParser()
 	e.parseDirChunk(clusterdata, &entries)
+	return entries
+}
+
+func (e *ExFAT) parseDeletedDirEntries(clusterdata []byte) []Entry {
+	var entries []Entry
+	e.resetDirParser()
+	e.clusterdata = clusterdata
+
+	for offset := 0; offset+EXFAT_DIRRECORD_SIZE <= len(clusterdata); offset += EXFAT_DIRRECORD_SIZE {
+		rec, ok := newDirRecordView(clusterdata, offset)
+		if !ok {
+			break
+		}
+		e.offset = offset
+		e.dirtype = rec.typeByte()
+
+		if e.dirtype == 0 {
+			e.clearParsedEntry()
+			continue
+		}
+
+		if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
+			e.clearParsedEntry()
+			if e.validateFileDentry(rec.data) {
+				e.setChecksum = exfatDirSetChecksumAdd(0, rec.data, true)
+				e.populateDirRecordDel(rec)
+				e.expectedSC = int(e.entry.secondaryCount)
+				e.expectedChecksum = uint16(rec.byteAt(2)) | (uint16(rec.byteAt(3)) << 8)
+			}
+			continue
+		}
+
+		if (e.dirtype&0x7f) == EXFAT_DIRRECORD_DEL_STREAM_EXT && e.entryState == ENTRY_STATE_85_SEEN {
+			if e.validateFileStreamDentry(rec.data) {
+				e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec.data, false)
+				e.populateDirRecordStreamSeen(rec)
+				e.expectedNameLen = int(e.entry.nameLen)
+			}
+			continue
+		}
+
+		if (e.dirtype&0x7f) == EXFAT_DIRRECORD_DEL_FILENAME_EXT && e.entryState == ENTRY_STATE_85_SEEN {
+			if !e.validateFileNameDentry(rec.data) {
+				continue
+			}
+
+			e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec.data, false)
+			e.nameUnits = append(e.nameUnits, utf16leUnitsFromBytes(rec.bytes(2, EXFAT_DIRRECORD_SIZE), 15)...)
+
+			if e.remainingSC < 1 {
+				continue
+			}
+			e.remainingSC--
+			if e.remainingSC != 0 {
+				continue
+			}
+
+			if e.expectedNameLen > 0 && len(e.nameUnits) > e.expectedNameLen {
+				e.nameUnits = e.nameUnits[:e.expectedNameLen]
+			}
+			if e.optimistic || e.expectedChecksum == e.setChecksum {
+				e.entry.name = utf16UnitsToString(e.nameUnits)
+			}
+			if e.entry.IsDeleted() {
+				e.entry.name += DELETED
+			}
+			entries = append(entries, e.entry)
+			e.clearParsedEntry()
+		}
+	}
+
 	return entries
 }
 
@@ -426,13 +518,9 @@ func (e *ExFAT) parseDirChunk(clusterdata []byte, entries *[]Entry) bool {
 							}
 
 							*entries = append(*entries, e.entry)
-							e.entry.name = ""
+							e.entry = Entry{}
 							e.entryState = ENTRY_STATE_LAST_C1_SEEN
-							e.setChecksum = 0
-							e.expectedChecksum = 0
-							e.expectedSC = 0
-							e.expectedNameLen = 0
-							e.nameUnits = nil
+							e.resetSetAssembly()
 						}
 					}
 				}

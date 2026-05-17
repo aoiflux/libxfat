@@ -15,16 +15,6 @@ func countBitmap(bitmapContent []byte) uint32 {
 	return counter.count()
 }
 
-<<<<<<< Updated upstream
-	for i := range length {
-		allocated += countBits(unpackLELong(bitmapContent[i*4 : (i+1)*4]))
-	}
-
-	if rem > 0 {
-		for _, b := range bitmapContent[length*4:] {
-			allocated += countBits(uint32(b))
-		}
-=======
 type bitmapCounter struct {
 	tail    [4]byte
 	tailLen int
@@ -43,7 +33,6 @@ func (c *bitmapCounter) write(chunk []byte) {
 		c.total += countBits(unpackLELong(c.tail[:]))
 		c.tailLen = 0
 		chunk = chunk[need:]
->>>>>>> Stashed changes
 	}
 
 	for len(chunk) >= 4 {
@@ -79,7 +68,7 @@ func countBits(bitn uint32) uint32 {
 func unicodeFromAscii(raw []byte, unicodeCharCount int) string {
 	// `VolumeLabel` is a Unicode-encoded string and the character-count
 	// corresponds to the number of Unicode characters. The character-count may
-	// still include trailing NULs, sowe intentional skip over those.
+	// still include trailing NULs, so we intentionally skip over those.
 
 	decodedString := make([]rune, 0)
 	for i := 0; i < unicodeCharCount; i++ {
