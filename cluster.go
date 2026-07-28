@@ -34,14 +34,13 @@ func (v *VBR) readClusters(cluster uint32, nbcluster uint64) ([]byte, error) {
 		return nil, fmt.Errorf("out of range: cluster=%d count=%d", cluster, nbcluster)
 	}
 
-	offset := v.getClusterOffset(cluster)
-	_, err := v.dimage.Seek(int64(offset), io.SeekStart)
+	offset, err := safeInt64(v.getClusterOffset(cluster))
 	if err != nil {
 		return nil, err
 	}
 
 	clusterdata := make([]byte, v.clusterSize*nbcluster)
-	_, err = io.ReadFull(v.dimage, clusterdata)
+	err = v.readAt(clusterdata, offset)
 
 	return clusterdata, err
 }
@@ -56,19 +55,18 @@ func (v *VBR) nextCluster(cluster uint32) (uint32, error) {
 		return 0, fmt.Errorf("cluster out of fat: %d", cluster)
 	}
 
-	offset := int64(v.firstFat) + (int64(cluster) * 4)
-	_, err := v.dimage.Seek(offset, io.SeekStart)
+	fatBase, err := safeInt64(v.firstFat)
 	if err != nil {
 		return 0, err
 	}
+	offset := fatBase + (int64(cluster) * 4)
 
-	data := make([]byte, 4)
-	_, err = io.ReadFull(v.dimage, data)
-	if err != nil {
+	var data [4]byte
+	if err := v.readAt(data[:], offset); err != nil {
 		return 0, err
 	}
 
-	nextCluster := unpackLELong(data) & EXFAT_CLUSTER_MASK
+	nextCluster := unpackLELong(data[:]) & EXFAT_CLUSTER_MASK
 	if nextCluster == EXFAT_BAD_CLUSTER {
 		return 0, ErrBadCluster
 	}
@@ -83,14 +81,12 @@ func (v *VBR) readClusterInto(cluster uint32, buf []byte) error {
 		return fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)
 	}
 
-	offset := v.getClusterOffset(cluster)
-	_, err := v.dimage.Seek(int64(offset), io.SeekStart)
+	offset, err := safeInt64(v.getClusterOffset(cluster))
 	if err != nil {
 		return err
 	}
 
-	_, err = io.ReadFull(v.dimage, buf)
-	return err
+	return v.readAt(buf, offset)
 }
 
 func (v *VBR) visitContiguousClusters(start uint32, count uint64, visitor func(cluster uint32, data []byte) error) error {
@@ -207,6 +203,18 @@ func (v *VBR) extractEntryContent(entry Entry, dstpath string) error {
 	}
 	defer dstfile.Close()
 
+	// A zero-length entry yields an empty file. Returning early also keeps
+	// entries with no allocation ($OrphanFiles, empty files, directories with a
+	// zero data length) away from the cluster arithmetic below, where an
+	// entryCluster of 0 would underflow into a nonsense offset.
+	if entry.dataLen == 0 {
+		return nil
+	}
+
+	if entry.isRegion {
+		return v.extractRegion(entry, dstfile)
+	}
+
 	if !entry.noFatChain {
 		return v.extractFatChainedContent(entry, dstfile)
 	}
@@ -214,13 +222,47 @@ func (v *VBR) extractEntryContent(entry Entry, dstpath string) error {
 	return v.extractContiguesContent(entry, dstfile)
 }
 
-func (v *VBR) extractContiguesContent(entry Entry, dstfile *os.File) error {
-	entryClusterOffset := v.getClusterOffset(entry.entryCluster)
-	_, err := v.dimage.Seek(int64(entryClusterOffset), io.SeekStart)
+// extractRegion copies a fixed byte range of the image, which is how the
+// synthetic $MBR, $FAT1 and $FAT2 entries are backed.
+func (v *VBR) extractRegion(entry Entry, dstfile *os.File) error {
+	length, err := safeInt64(entry.dataLen)
 	if err != nil {
 		return err
 	}
-	_, err = io.CopyN(dstfile, v.dimage, int64(entry.dataLen))
+	offset, err := safeInt64(entry.regionOffset)
+	if err != nil {
+		return err
+	}
+
+	section, err := v.sectionReader(offset, length)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.CopyN(dstfile, section, length)
+	return err
+}
+
+func (v *VBR) extractContiguesContent(entry Entry, dstfile *os.File) error {
+	if !v.isValidCluster(entry.entryCluster) {
+		return fmt.Errorf("%w: %d", ErrInvalidCluster, entry.entryCluster)
+	}
+
+	length, err := safeInt64(entry.dataLen)
+	if err != nil {
+		return err
+	}
+	offset, err := safeInt64(v.getClusterOffset(entry.entryCluster))
+	if err != nil {
+		return err
+	}
+
+	section, err := v.sectionReader(offset, length)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.CopyN(dstfile, section, length)
 	return err
 }
 
@@ -232,8 +274,21 @@ func (v *VBR) extractFatChainedContent(entry Entry, dstfile *os.File) error {
 }
 
 func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
+	// Region entries ($MBR, $FAT1, $FAT2) are byte ranges outside the cluster
+	// heap. Running them through the arithmetic below derives a cluster number
+	// from a first cluster of 0 and then complains about that derived value,
+	// which tells the caller nothing useful.
+	if entry.isRegion {
+		return nil, 0, ErrNoClusterMapping
+	}
+
 	if entry.dataLen == 0 {
 		return nil, 0, nil
+	}
+
+	// Report the cluster that is actually wrong, not one computed from it.
+	if !v.isValidCluster(entry.entryCluster) {
+		return nil, 0, fmt.Errorf("%w: %d", ErrInvalidCluster, entry.entryCluster)
 	}
 
 	sizeInClusters, remainder := v.size2Clusters(entry.dataLen)

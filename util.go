@@ -140,18 +140,6 @@ func utf16UnitsToString(units []uint16) string {
 	return string(runes)
 }
 
-func getDateTimeString(datetime, ms uint32) string {
-	year := (datetime >> 25) + 1980
-	month := (datetime >> 21) & 0xf
-	day := (datetime >> 16) & 0x1f
-	hour := (datetime >> 11) & 0x1f
-	min := (datetime >> 5) & 0x3f
-	sec := (datetime & 0x1f) << 1 //(15 means 30secs)
-
-	datetimestring := fmt.Sprintf("%d/%d/%d %d:%d:%d:%d", year, month, day, hour, min, sec, ms)
-	return datetimestring
-}
-
 func getFileAttributes(attr uint16) string {
 	const char = '-'
 	arc := char

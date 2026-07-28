@@ -8,9 +8,12 @@ The library is read-oriented. It does not create or modify exFAT volumes.
 
 ## Highlights
 
-- Parse exFAT images directly from an `*os.File`.
+- Parse exFAT images from an `*os.File` or any `io.ReaderAt`, so the library can
+  be layered directly over a decoded EWF/VHD device or a partition reader.
 - Read the root directory or recursively walk indexable entries.
-- Extract regular files while preserving directory structure.
+- Extract regular files while preserving directory structure, plus the
+  filesystem's own metadata streams and regions.
+- Report full MACB timestamps in UTC, anchored by the exFAT UTC offset fields.
 - Report volume statistics such as cluster size, used space, and allocation
   bitmap counts.
 - Surface exFAT metadata entries such as `$BitMap`, `$UpCase`, `$Volume GUID`,
@@ -177,11 +180,58 @@ inside a larger image:
 fs, err := libxfat.New(imageFile, false, 2048)
 ```
 
+### Opening Without A File
+
+`NewFromReaderAt` accepts any `io.ReaderAt`, so a volume can be parsed straight
+out of a decoded container (EWF, VHD, ...) or an in-memory buffer with no
+temporary file in between:
+
+```go
+fs, err := libxfat.NewFromReaderAt(device, deviceSize, false, 2048)
+```
+
+`size` may be `0` if unknown, but supplying it is worthwhile: it turns a read
+past the end of a truncated or malformed image into a clean
+`io.ErrUnexpectedEOF` instead of deferring to whatever the reader does with an
+out-of-range offset.
+
+Reads no longer move a shared seek cursor, so several independently opened
+volumes may share one reader concurrently. A single `ExFAT` value is still not
+safe for concurrent use — directory parsing keeps mutable state on it — so open
+one per goroutine.
+
+### Opening A Partition
+
+Strict mode cross-checks the `PartitionOffset` recorded in the volume boot
+record against where the volume was opened. That works for a whole-disk image,
+but not for a reader already scoped to a partition: the reader starts at byte 0
+while the volume still records its true LBA, and the two disagree.
+
+`Open` separates the two facts:
+
+```go
+partition := io.NewSectionReader(disk, partitionStart, partitionLength)
+
+fs, err := libxfat.Open(libxfat.Source{
+    Reader:       partition,
+    Size:         partitionLength,
+    Strict:       true,
+    PartitionLBA: 2048, // where the partition table says this volume lives
+})
+```
+
+Set `IgnorePartitionOffset` instead when the LBA is unknown. Many imaging tools
+and virtual disk formats write a zero `PartitionOffset` regardless of where the
+volume actually sits, so this is a legitimate setting rather than an escape
+hatch — but it does discard one consistency signal.
+
 ## Core API
 
 ### Open And Inspect
 
 - `New(imagefile *os.File, optimistic bool, offset ...uint64) (ExFAT, error)`
+- `NewFromReaderAt(r io.ReaderAt, size int64, optimistic bool, offset ...uint64) (ExFAT, error)`
+- `Open(src Source) (*ExFAT, error)`
 - `ReadRootDir() ([]Entry, error)`
 - `ReadDir(entry Entry) ([]Entry, error)`
 - `ReadDirs(entries []Entry) ([]Entry, error)`
@@ -208,19 +258,61 @@ fs, err := libxfat.New(imageFile, false, 2048)
 - `GetClusterList(entry Entry) ([]uint32, uint64, error)`
 - `GetClusterOffset(cluster uint32) uint64`
 
+`GetClusterList` describes entries that live in the cluster heap. The synthetic
+`$MBR`, `$FAT1` and `$FAT2` entries do not, so it returns `ErrNoClusterMapping`
+for them; locate those with `entry.GetRegionOffset()` plus `entry.GetSize()`.
+
 ### Entry Helpers
 
 Each parsed directory item is represented by `Entry`. Common helpers include:
 
 - `GetName()`
 - `GetSize()`
+- `GetValidDataSize()`
 - `GetEntryCluster()`
+- `GetEntryType()`
+- `GetAttributes()`
 - `IsDir()` and `IsFile()`
 - `IsDeleted()`
 - `IsIndexed()`
 - `IsSpecialFile()`
 - `IsVirtualEntry()`
+- `IsRegion()` and `IsMetadataStream()`
+- `GetRegionOffset() (uint64, bool)`
 - `HasFatChain()` and `DoesNotHaveFatChain()`
+
+### Timestamps
+
+- `GetModifiedTime() time.Time`
+- `GetCreatedTime() time.Time`
+- `GetAccessedTime() time.Time`
+- `GetTimestamps() Timestamps`
+
+All three getters return UTC, or the zero `time.Time` when the volume records
+no usable value — check `IsZero()` rather than assuming a real date.
+
+Two properties of exFAT are worth knowing before relying on these:
+
+**There are three timestamps, not four.** exFAT stores creation, last
+modification and last access. There is no Unix-`ctime` equivalent, so in MACB
+terms an entry supplies M, A and C, with B (birth) being the same value as
+creation. Creation and modification carry an extra 10ms-resolution field;
+access does not, so access times always land on a two-second boundary.
+
+**Stored times are wall-clock readings, not instants.** Each timestamp has a
+companion UTC offset byte, and only that byte makes the reading absolute. When
+a volume records no offset the getters return the stored wall clock as though it
+were UTC, which may be wrong by the writing system's time zone. `GetTimestamps`
+reports which case applies, and also returns the readings exactly as stored:
+
+```go
+ts := entry.GetTimestamps()
+if ts.ModifiedOffsetValid {
+    fmt.Println("anchored:", ts.Modified)          // true UTC
+} else {
+    fmt.Println("unanchored:", ts.ModifiedLocal)   // wall clock, zone unknown
+}
+```
 
 ## Special And Virtual Entries
 
@@ -243,6 +335,22 @@ metadata easier to inspect from the root listing, including:
 
 Use `entry.IsSpecialFile()` and `entry.IsVirtualEntry()` to distinguish them
 from regular files and directories.
+
+`$FAT2` is emitted only when the volume boot record declares two FATs, as TexFAT
+volumes do; comparing the two tables is itself an evidentiary signal.
+
+These entries are readable as well as listable. `ExtractEntryContent` accepts
+the cluster-backed metadata streams (`$BitMap`, `$UpCase`) and the region-backed
+synthetic entries (`$MBR`, `$FAT1`, `$FAT2`) alongside regular files:
+
+```go
+for _, entry := range entries {
+    if entry.IsMetadataStream() || entry.IsRegion() {
+        err := fs.ExtractEntryContent(entry, filepath.Join(outdir, entry.GetName()))
+        // ...
+    }
+}
+```
 
 ## Examples
 
@@ -285,6 +393,47 @@ The repository includes both package-level tests and higher-level tests under
 - Virtual and special entry behavior.
 - Allocation bitmap counting.
 - Path-preserving extraction behavior.
+- Equivalence between the `*os.File` and `io.ReaderAt` paths.
+- Partition-relative and 4096-byte-sector volumes.
+- Timestamp decoding, including UTC offsets and malformed dates.
+
+Concurrency is worth checking too, since several volumes may share one reader:
+
+```bash
+go test -race ./...
+```
+
+### Fuzzing
+
+Three targets cover the parsers that walk attacker-controlled lengths and counts:
+
+```bash
+go test -fuzz FuzzParseVBRData -fuzztime 60s .
+go test -fuzz FuzzParseDirChunk -fuzztime 60s .
+go test -fuzz FuzzOpen -fuzztime 60s .
+```
+
+### Real Images
+
+The synthetic image the unit tests build is deliberately tiny: a single-cluster
+root directory, no subdirectories, no fragmented files. That leaves FAT chain
+walking, multi-cluster directories and fragmented extraction untested against
+anything a real formatter produced.
+
+Point `LIBXFAT_CORPUS` at a directory of exFAT images to close that gap without
+committing binary fixtures:
+
+```bash
+LIBXFAT_CORPUS=/path/to/images go test ./tests/ -run Corpus -v
+```
+
+Images may be raw volume dumps or whole-disk images with a partition table; the
+harness locates the volume boot record either way. It checks that fragments land
+inside the image, that extracted content is exactly the advertised length, that
+valid data length never exceeds allocated length, and that timestamps are either
+absent or plausible. Volumes formatted by Windows, by macOS and by `mkfs.exfat`
+are all worth including, since the three disagree about the number of FATs, the
+sector size, and whether a UTC offset is recorded at all.
 
 ## Notes On Robustness
 

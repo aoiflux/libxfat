@@ -11,7 +11,7 @@ func TestParseVBRDataRejectsInvalidSectorSize(t *testing.T) {
 	vbrData[EXFAT_SECTOR_SIZE_OFFSET] = 8
 
 	var vbr VBR
-	err := vbr.parseVBRData(vbrData, 0, false)
+	err := vbr.parseVBRData(vbrData, Source{Strict: true})
 	if err == nil || !strings.Contains(err.Error(), "invalid sector size") {
 		t.Fatalf("parseVBRData() error = %v, want invalid sector size", err)
 	}
@@ -22,7 +22,7 @@ func TestParseVBRDataRejectsZeroClusterCount(t *testing.T) {
 	binary.LittleEndian.PutUint32(vbrData[EXFAT_NB_CLUSTERS:EXFAT_NB_CLUSTERS+4], 0)
 
 	var vbr VBR
-	err := vbr.parseVBRData(vbrData, 0, false)
+	err := vbr.parseVBRData(vbrData, Source{Strict: true})
 	if err == nil || !strings.Contains(err.Error(), "invalid cluster count") {
 		t.Fatalf("parseVBRData() error = %v, want invalid cluster count", err)
 	}
@@ -33,7 +33,7 @@ func TestParseVBRDataRejectsInvalidRootCluster(t *testing.T) {
 	binary.LittleEndian.PutUint32(vbrData[EXFAT_ROOT_CLUSTER_OFFSET:EXFAT_ROOT_CLUSTER_OFFSET+4], 1)
 
 	var vbr VBR
-	err := vbr.parseVBRData(vbrData, 0, false)
+	err := vbr.parseVBRData(vbrData, Source{Strict: true})
 	if err == nil || !strings.Contains(err.Error(), "invalid root directory cluster") {
 		t.Fatalf("parseVBRData() error = %v, want invalid root directory cluster", err)
 	}

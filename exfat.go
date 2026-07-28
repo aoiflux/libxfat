@@ -77,12 +77,18 @@ func (e *ExFAT) GetClusterSize() uint64 {
 	return e.vbr.clusterSize
 }
 
+// ExtractEntryContent writes the entry's content stream to dstpath.
+//
+// Alongside regular files it accepts the filesystem's own metadata: the
+// $BitMap and $UpCase streams, and the $MBR, $FAT1 and $FAT2 regions. Those
+// entries report IsInvalid, because they are not file entry sets, but they do
+// have recoverable content and refusing them left them visible yet unreadable.
 func (e *ExFAT) ExtractEntryContent(entry Entry, dstpath string) error {
-	if entry.IsInvalid() {
-		return ErrInvalidEntry
-	}
 	if entry.IsDeleted() {
 		return ErrDeletedEntry
+	}
+	if !entry.IsRegion() && !entry.IsMetadataStream() && entry.IsInvalid() {
+		return ErrInvalidEntry
 	}
 	return e.vbr.extractEntryContent(entry, dstpath)
 }
@@ -456,20 +462,18 @@ func (e *ExFAT) parseDirChunk(clusterdata []byte, entries *[]Entry) bool {
 				e.populateRecordBitmapUpcase(rec)
 				*entries = append(*entries, e.virtualEntry)
 			}
+		// These three records carry no content stream. They must be built from a
+		// clean Entry rather than by patching the shared virtualEntry, which
+		// still holds the cluster and length of whichever $BitMap or $UpCase
+		// record was parsed before them.
 		case EXFAT_DIRRECORD_VOLUME_GUID:
-			e.virtualEntry.etype = e.dirtype
-			e.virtualEntry.name = VOLUME_GUID
-			e.virtualEntry.entryAttr = 0
+			e.virtualEntry = Entry{etype: e.dirtype, name: VOLUME_GUID}
 			*entries = append(*entries, e.virtualEntry)
 		case EXFAT_DIRRECORD_TEXFAT:
-			e.virtualEntry.etype = e.dirtype
-			e.virtualEntry.name = TEXFAT
-			e.virtualEntry.entryAttr = 0
+			e.virtualEntry = Entry{etype: e.dirtype, name: TEXFAT}
 			*entries = append(*entries, e.virtualEntry)
 		case EXFAT_DIRRECORD_ACT:
-			e.virtualEntry.etype = e.dirtype
-			e.virtualEntry.name = ACT
-			e.virtualEntry.entryAttr = 0
+			e.virtualEntry = Entry{etype: e.dirtype, name: ACT}
 			*entries = append(*entries, e.virtualEntry)
 		default:
 			if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
@@ -555,9 +559,15 @@ func (e *ExFAT) populateRecordBitmapUpcase(rec dirRecordView) {
 	e.virtualEntry.accessed = 0
 	e.virtualEntry.modified10ms = 0
 	e.virtualEntry.created10ms = 0
+	e.virtualEntry.modifiedUtcOffset = 0
+	e.virtualEntry.createdUtcOffset = 0
+	e.virtualEntry.accessedUtcOffset = 0
 	e.virtualEntry.entryAttr = 0
 	e.virtualEntry.secondaryCount = 0
 	e.virtualEntry.noFatChain = false
+	e.virtualEntry.isRegion = false
+	e.virtualEntry.regionOffset = 0
+	e.virtualEntry.validDataLen = dataLen
 
 	switch e.dirtype {
 	case EXFAT_DIRRECORD_BITMAP:
@@ -581,6 +591,10 @@ func (e *ExFAT) populateDirRecordDel(rec dirRecordView) {
 	e.entry.accessed = rec.le32(16)
 	e.entry.created10ms = rec.byteAt(20)
 	e.entry.modified10ms = rec.byteAt(21)
+	// Without these the timestamps above are unanchored wall-clock readings.
+	e.entry.createdUtcOffset = rec.byteAt(22)
+	e.entry.modifiedUtcOffset = rec.byteAt(23)
+	e.entry.accessedUtcOffset = rec.byteAt(24)
 	e.remainingSC = int(e.entry.secondaryCount)
 	// Both 0x85 (allocated) and 0x05 (deleted) begin a file entry set.
 	if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
@@ -592,7 +606,10 @@ func (e *ExFAT) populateDirRecordStreamSeen(rec dirRecordView) {
 	e.entry.readNameLen = 0
 	e.entry.entryCluster = rec.le32(20)
 	e.entry.dataLen = rec.le64(24)
-	e.entry.validDataLen = rec.le64(24)
+	// ValidDataLength lives at offset 8 of the stream extension entry, not 24.
+	// Reading it from 24 made it a duplicate of DataLength, which hides the
+	// allocated-but-never-written tail that slack analysis depends on.
+	e.entry.validDataLen = rec.le64(8)
 
 	e.entry.noFatChain = false
 	if (rec.byteAt(1) & NOT_FAT_CHAIN_FLAG) != 0 {
@@ -607,25 +624,51 @@ func (e *ExFAT) populateDirRecordStreamSeen(rec dirRecordView) {
 func (e *ExFAT) createVirtualEntries() []Entry {
 	var virtualEntries []Entry
 
-	// $MBR virtual entry - represents the Master Boot Record / VBR
+	fatBytes := uint64(e.vbr.fatSize) * uint64(e.vbr.sectorSize)
+
+	// $MBR virtual entry - represents the Master Boot Record / VBR.
+	// The boot region is 12 sectors of the volume's own sector size, which is
+	// not necessarily 512.
 	mbrEntry := Entry{
-		etype:      0xFF, // Virtual entry type
-		name:       MBR,
-		dataLen:    uint64(VBR_SIZE * SECTOR_SIZE),
-		entryAttr:  ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
-		noFatChain: true,
+		etype:        0xFF, // Virtual entry type
+		name:         MBR,
+		dataLen:      uint64(VBR_SIZE) * uint64(e.vbr.sectorSize),
+		entryAttr:    ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
+		noFatChain:   true,
+		isRegion:     true,
+		regionOffset: uint64(e.vbr.base),
 	}
+	mbrEntry.validDataLen = mbrEntry.dataLen
 	virtualEntries = append(virtualEntries, mbrEntry)
 
 	// $FAT1 virtual entry - represents the first FAT
 	fat1Entry := Entry{
-		etype:      0xFF, // Virtual entry type
-		name:       FAT1,
-		dataLen:    uint64(e.vbr.fatSize) * uint64(e.vbr.sectorSize),
-		entryAttr:  ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
-		noFatChain: true,
+		etype:        0xFF, // Virtual entry type
+		name:         FAT1,
+		dataLen:      fatBytes,
+		validDataLen: fatBytes,
+		entryAttr:    ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
+		noFatChain:   true,
+		isRegion:     true,
+		regionOffset: e.vbr.firstFat,
 	}
 	virtualEntries = append(virtualEntries, fat1Entry)
+
+	// $FAT2 virtual entry - only present on TexFAT volumes, where comparing the
+	// two tables is itself an evidentiary signal.
+	if e.vbr.numberOfFats == 2 {
+		fat2Entry := Entry{
+			etype:        0xFF, // Virtual entry type
+			name:         FAT2,
+			dataLen:      fatBytes,
+			validDataLen: fatBytes,
+			entryAttr:    ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
+			noFatChain:   true,
+			isRegion:     true,
+			regionOffset: e.vbr.firstFat + fatBytes,
+		}
+		virtualEntries = append(virtualEntries, fat2Entry)
+	}
 
 	// $OrphanFiles virtual directory - represents orphaned/unlinked files
 	orphanEntry := Entry{

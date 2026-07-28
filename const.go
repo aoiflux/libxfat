@@ -6,24 +6,25 @@ import (
 
 // ExFAT Constants
 const (
-	VBR_SIZE                         = 12
-	SECTOR_SIZE               uint64 = 512
-	SYNC_OFFSET                      = 0x1fe
-	SYNC_VALUE                       = 0x55aa
-	EXFAT_SIGN_OFFSET                = 3
-	EXFAT_VBR1_OFFSET                = 0x40
-	EXFAT_VOLSIZE_OFFSET             = 0x48
-	EXFAT_FAT1_OFFSET                = 0x50
-	EXFAT_FATSIZE_OFFSET             = 0x54
-	EXFAT_DATA_OFFSET                = 0x58
-	EXFAT_NB_CLUSTERS                = 0x5C
-	EXFAT_ROOT_CLUSTER_OFFSET        = 0x60
-	EXFAT_SN_OFFSET                  = 0x64
-	EXFAT_VERSION_OFFSET             = 0x68
-	EXFAT_SECTOR_SIZE_OFFSET         = 0x6c
-	EXFAT_CLUSTER_SIZE_OFFSET        = 0x6d
-	EXFAT_SIGNATURE                  = "EXFAT   "
-	EXFAT_PERCENT_USE_OFFSET         = 0x70
+	VBR_SIZE                           = 12
+	SECTOR_SIZE                 uint64 = 512
+	SYNC_OFFSET                        = 0x1fe
+	SYNC_VALUE                         = 0x55aa
+	EXFAT_SIGN_OFFSET                  = 3
+	EXFAT_VBR1_OFFSET                  = 0x40
+	EXFAT_VOLSIZE_OFFSET               = 0x48
+	EXFAT_FAT1_OFFSET                  = 0x50
+	EXFAT_FATSIZE_OFFSET               = 0x54
+	EXFAT_DATA_OFFSET                  = 0x58
+	EXFAT_NB_CLUSTERS                  = 0x5C
+	EXFAT_ROOT_CLUSTER_OFFSET          = 0x60
+	EXFAT_SN_OFFSET                    = 0x64
+	EXFAT_VERSION_OFFSET               = 0x68
+	EXFAT_SECTOR_SIZE_OFFSET           = 0x6c
+	EXFAT_CLUSTER_SIZE_OFFSET          = 0x6d
+	EXFAT_NUMBER_OF_FATS_OFFSET        = 0x6e
+	EXFAT_SIGNATURE                    = "EXFAT   "
+	EXFAT_PERCENT_USE_OFFSET           = 0x70
 
 	// There is no cluster 0 or cluster 1 in ExFAT. It starts with cluster 2
 	FIRST_CLUSTER_NUMBER uint64 = 2
@@ -100,3 +101,28 @@ var ErrInvalidCluster = errors.New("invalid cluster")
 var ErrBadCluster = errors.New("bad cluster in FAT chain")
 var ErrClusterChainLoop = errors.New("cluster chain loop detected")
 var ErrAllocationBitmapNotFound = errors.New("allocation bitmap not found")
+
+// ErrNilReader is returned when a volume is opened without a backing reader.
+var ErrNilReader = errors.New("nil image reader")
+
+// ErrOutOfBounds is returned when a computed read falls outside the image.
+var ErrOutOfBounds = errors.New("read outside image bounds")
+
+// ErrPartitionOffsetMismatch is returned in strict mode when the PartitionOffset
+// recorded in the volume boot record disagrees with where the volume was opened.
+// The message is kept prefix-compatible with releases before v1.1.0.
+var ErrPartitionOffsetMismatch = errors.New("invalid vbr address")
+
+// ErrExfatSignature is returned when the volume boot record is not exFAT.
+var ErrExfatSignature = errors.New("exfat signature mismatch")
+
+// ErrSyncValue is returned when the volume boot record lacks the 0x55AA marker.
+var ErrSyncValue = errors.New("no sync value in vbr")
+
+// ErrNoContent is returned when an entry has no recoverable content stream.
+var ErrNoContent = errors.New("entry has no recoverable content")
+
+// ErrNoClusterMapping is returned by GetClusterList for entries that are backed
+// by a fixed byte range rather than by clusters, namely $MBR, $FAT1 and $FAT2.
+// Use Entry.GetRegionOffset to locate those.
+var ErrNoClusterMapping = errors.New("entry is not mapped through clusters")
