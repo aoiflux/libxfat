@@ -1,6 +1,7 @@
 package libxfat
 
 import (
+	"fmt"
 	"io"
 	"strings"
 )
@@ -66,6 +67,15 @@ type Entry struct {
 	// image ($MBR, $FAT1, $FAT2) rather than onto a cluster chain.
 	isRegion     bool
 	regionOffset uint64
+	// nameChecksumChecked records whether the entry set's checksum was compared
+	// against the value recorded on disk. It is false in optimistic mode, where
+	// the comparison is skipped, and false for synthetic and virtual entries,
+	// which are not entry sets at all.
+	nameChecksumChecked bool
+	// nameChecksumVerified is meaningful only when nameChecksumChecked is set.
+	nameChecksumVerified bool
+	expectedSetChecksum  uint16
+	computedSetChecksum  uint16
 }
 
 func (e Entry) IsInvalid() bool {
@@ -134,6 +144,41 @@ func (e Entry) GetValidDataSize() uint64 {
 	return e.validDataLen
 }
 
+// NameChecksumVerified reports whether the entry set's checksum was compared
+// against the value recorded on disk and matched. It is false both for a
+// mismatch and for an entry whose checksum was never checked - optimistic mode,
+// and synthetic entries such as $MBR - so it answers "is this name provably
+// intact", not "is this name suspect". For the latter use NameChecksumMismatch.
+func (e Entry) NameChecksumVerified() bool {
+	return e.nameChecksumChecked && e.nameChecksumVerified
+}
+
+// NameChecksumMismatch reports whether the checksum was checked and disagreed.
+// A mismatched entry still carries its parsed name.
+func (e Entry) NameChecksumMismatch() bool {
+	return e.nameChecksumChecked && !e.nameChecksumVerified
+}
+
+// NameChecksumError returns an error wrapping ErrNameChecksumMismatch when the
+// entry set failed verification, and nil otherwise - including when no check
+// was performed. It lets a caller fold name-integrity handling into the same
+// error path as everything else.
+func (e Entry) NameChecksumError() error {
+	if !e.NameChecksumMismatch() {
+		return nil
+	}
+	return fmt.Errorf("%w: %q records checksum 0x%04x, computed 0x%04x",
+		ErrNameChecksumMismatch, e.name, e.expectedSetChecksum, e.computedSetChecksum)
+}
+
+// EntrySetChecksums returns the checksum recorded in the entry set's primary
+// record, the checksum computed over the set as read, and whether the two were
+// compared at all. It exists so a report can quote both values rather than just
+// the verdict.
+func (e Entry) EntrySetChecksums() (expected, computed uint16, checked bool) {
+	return e.expectedSetChecksum, e.computedSetChecksum, e.nameChecksumChecked
+}
+
 func (e Entry) GetNameLength() byte {
 	return e.nameLen
 }
@@ -188,12 +233,24 @@ type ExFAT struct {
 	clusterdata  []byte
 	dirtype      byte
 	optimistic   bool
+	// rejectChecksumMismatch drops an entry set whose checksum does not verify
+	// instead of reporting the mismatch on the entry. Off by default: the
+	// parsed name is evidence even when the set around it is damaged.
+	rejectChecksumMismatch bool
 	// Parsing state for filename/checksum assembly
 	setChecksum      uint16
 	expectedChecksum uint16
 	expectedSC       int
 	expectedNameLen  int
 	nameUnits        []uint16
+	// setInUse is the allocation state of the primary record that opened the
+	// current set. Secondary records must agree with it, otherwise a deleted
+	// record is being folded into an allocated set or vice versa.
+	setInUse bool
+	// sawStream guards against emitting a set that never carried a stream
+	// extension - it would have no cluster, no length and no name length - and
+	// against a second stream extension decrementing the secondary count twice.
+	sawStream bool
 }
 
 func (e *ExFAT) initEntryState(clusetrdata []byte, offset, remainingSC, entryState int) {

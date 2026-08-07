@@ -383,3 +383,121 @@ func TestCorpusRecoverDeleted(t *testing.T) {
 		})
 	}
 }
+
+// openCorpusImageOptimistic opens the same volume with verification off, so a
+// test can compare the two readings of one image.
+func openCorpusImageOptimistic(t *testing.T, path string) (libxfat.ExFAT, bool) {
+	t.Helper()
+
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+
+	base, found := findVolumeBase(file, info.Size())
+	if !found {
+		return libxfat.ExFAT{}, false
+	}
+
+	fs, err := libxfat.Open(libxfat.Source{Reader: file, Size: info.Size(), Base: base})
+	if err != nil {
+		t.Errorf("%s: optimistic open at byte %d: %v", filepath.Base(path), base, err)
+		return libxfat.ExFAT{}, false
+	}
+	return *fs, true
+}
+
+// TestCorpusStrictMatchesOptimistic is a standing differential invariant:
+// turning verification on must change what the library reports about the
+// volume, never what it finds in it.
+//
+// Strict mode used to fail this on every image, because a checksum computed
+// over the wrong byte range made verification fail for every entry set and the
+// failure path replaced each name with an empty string.
+func TestCorpusStrictMatchesOptimistic(t *testing.T) {
+	for _, path := range corpusImages(t) {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			strictFS, _, ok := openCorpusImage(t, path)
+			if !ok {
+				return
+			}
+			optimisticFS, ok := openCorpusImageOptimistic(t, path)
+			if !ok {
+				return
+			}
+
+			names := func(fs *libxfat.ExFAT) []string {
+				root, err := fs.ReadRootDir()
+				if err != nil {
+					t.Fatalf("ReadRootDir(): %v", err)
+				}
+				all, err := fs.GetAllEntries(root)
+				if err != nil {
+					t.Fatalf("GetAllEntries(): %v", err)
+				}
+				if len(all) > corpusMaxEntries {
+					all = all[:corpusMaxEntries]
+				}
+				out := make([]string, 0, len(all))
+				for _, entry := range all {
+					out = append(out, entry.GetName())
+				}
+				return out
+			}
+
+			strict := names(&strictFS)
+			optimistic := names(&optimisticFS)
+
+			if len(strict) != len(optimistic) {
+				t.Fatalf("strict found %d entries, optimistic %d", len(strict), len(optimistic))
+			}
+
+			var blank, mismatched int
+			for i := range strict {
+				if strict[i] != optimistic[i] {
+					t.Errorf("entry %d: strict %q, optimistic %q", i, strict[i], optimistic[i])
+					mismatched++
+					if mismatched > 10 {
+						t.Fatal("too many name differences; stopping")
+					}
+				}
+				if strict[i] == "" {
+					blank++
+				}
+			}
+			if blank > 0 {
+				t.Errorf("%d of %d entries have an empty name in strict mode", blank, len(strict))
+			}
+
+			// Report how much of the volume actually verified, so a corpus run
+			// says something about image integrity rather than only about parity.
+			root, err := strictFS.ReadRootDir()
+			if err != nil {
+				t.Fatalf("ReadRootDir(): %v", err)
+			}
+			all, err := strictFS.GetAllEntries(root)
+			if err != nil {
+				t.Fatalf("GetAllEntries(): %v", err)
+			}
+			var verified, failed int
+			for _, entry := range all {
+				switch {
+				case entry.NameChecksumVerified():
+					verified++
+				case entry.NameChecksumMismatch():
+					failed++
+					if failed <= 5 {
+						t.Logf("checksum mismatch: %v", entry.NameChecksumError())
+					}
+				}
+			}
+			t.Logf("%d entry sets verified, %d failed", verified, failed)
+		})
+	}
+}

@@ -1,3 +1,51 @@
+// Package libxfat is a read-only, forensically-minded exFAT parser.
+//
+// It never writes to the image, it reads exclusively through io.ReaderAt so it
+// can be layered directly over a decoded EWF/VHD device or an io.SectionReader
+// scoped to a single partition, and it surfaces what it could not verify rather
+// than quietly papering over it.
+//
+// # Opening a volume
+//
+// Open is the constructor to reach for; it takes a Source describing where the
+// volume lives and how strictly to validate it. New and NewFromReaderAt are the
+// older, narrower forms, kept for compatibility.
+//
+//	fs, err := libxfat.Open(libxfat.Source{
+//		Reader: file,
+//		Size:   size,
+//		Strict: true,
+//	})
+//
+// # Walking the volume
+//
+// ReadRootDir returns the root directory's entries plus the synthetic entries
+// describing the filesystem's own structures ($MBR, $FAT1, $FAT2,
+// $OrphanFiles). From there:
+//
+//   - ReadDir and ReadDirs descend one level.
+//   - GetAllEntries and GetIndexableEntries flatten the whole tree.
+//   - GetFullPathIndexableEntries does the same with paths composed.
+//   - RecoverDeletedEntries carves deleted entry sets out of unallocated
+//     clusters.
+//
+// Content comes out through ExtractEntryContent, or through GetClusterList and
+// Entry.GetRegionOffset for callers that would rather do their own reading.
+//
+// # Strict mode
+//
+// Strict enables the checks that matter for evidence: the PartitionOffset
+// cross-check performed when the volume is opened, and verification of each
+// directory entry set's checksum while parsing. A failed checksum never costs
+// you the parsed name - see Entry.NameChecksumMismatch - unless you ask for
+// that explicitly with Source.RejectChecksumMismatch.
+//
+// # Concurrency
+//
+// Several volumes may share one Reader concurrently, provided the Reader itself
+// is safe for concurrent ReadAt, as *os.File and bytes.Reader are. A single
+// ExFAT value is not safe for concurrent use: directory parsing keeps mutable
+// state on it. Open one per goroutine.
 package libxfat
 
 import (
@@ -56,6 +104,19 @@ type Source struct {
 	// actually sits, so this is a legitimate setting rather than an escape
 	// hatch - but it does discard one consistency signal.
 	IgnorePartitionOffset bool
+
+	// RejectChecksumMismatch drops any file entry set whose checksum fails
+	// verification, rather than returning the entry with the mismatch recorded
+	// on it. It is only consulted when Strict is set, since that is the only
+	// mode in which the checksum is checked at all.
+	//
+	// It is off by default, and should stay off for most evidence work: a
+	// damaged entry set is usually more interesting than a missing one, and the
+	// name parsed out of it is still the only record of what the file was
+	// called. Turn it on when downstream code cannot tolerate an entry whose
+	// metadata may be wrong. Either way, use Entry.NameChecksumMismatch to find
+	// out which entries did not verify.
+	RejectChecksumMismatch bool
 }
 
 // New opens an exFAT volume from an image file. offset is the volume's start
@@ -133,6 +194,7 @@ func open(src Source) (ExFAT, error) {
 
 	// The rest of the parser still speaks in terms of "optimistic".
 	exfatdata.optimistic = !src.Strict
+	exfatdata.rejectChecksumMismatch = src.Strict && src.RejectChecksumMismatch
 
 	var err error
 	exfatdata.vbr, err = parseVBR(src)

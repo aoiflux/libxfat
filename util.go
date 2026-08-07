@@ -89,8 +89,15 @@ func unicodeFromAscii(raw []byte, unicodeCharCount int) string {
 }
 
 // exfatDirSetChecksumAdd updates the running 16-bit checksum for a 32-byte
-// directory record. For the first FILE directory entry in a set, the checksum
-// field (bytes 2 and 3) must be treated as zero while computing the checksum.
+// directory record, following EntrySetChecksum in section 6.3.2 of the exFAT
+// specification.
+//
+// For the first FILE directory entry in a set the checksum field (bytes 2 and
+// 3) is skipped outright: the spec's loop does `continue`, so those positions
+// contribute neither their value nor a rotation. Folding them in as zero bytes
+// instead - which is what this function used to do - still rotates the
+// accumulator twice, permanently desynchronising it from the on-disk value and
+// making verification fail for effectively every entry set.
 func exfatDirSetChecksumAdd(accum uint16, record []byte, isFileDir bool) uint16 {
 	// exFAT directory record size is fixed (32 bytes), but be defensive.
 	limit := EXFAT_DIRRECORD_SIZE
@@ -98,12 +105,11 @@ func exfatDirSetChecksumAdd(accum uint16, record []byte, isFileDir bool) uint16 
 		limit = len(record)
 	}
 	for i := 0; i < limit; i++ {
-		b := record[i]
 		if isFileDir && (i == 2 || i == 3) {
-			b = 0
+			continue
 		}
 		// Rotate right by 1 and add the byte (keep 16-bit)
-		accum = ((accum >> 1) | (accum << 15)) + uint16(b)
+		accum = ((accum >> 1) | (accum << 15)) + uint16(record[i])
 	}
 	return accum
 }

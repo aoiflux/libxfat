@@ -122,6 +122,14 @@ var ErrSyncValue = errors.New("no sync value in vbr")
 // ErrNoContent is returned when an entry has no recoverable content stream.
 var ErrNoContent = errors.New("entry has no recoverable content")
 
+// ErrNameChecksumMismatch reports that a file entry set's recorded
+// EntrySetChecksum disagrees with the checksum computed over the set as read.
+// The entry's name is still returned: the mismatch is a statement about the
+// integrity of the set, not a reason to discard the only copy of the name.
+//
+// Reach it through Entry.NameChecksumError, and test with errors.Is.
+var ErrNameChecksumMismatch = errors.New("file name entry set checksum mismatch")
+
 // ErrNoClusterMapping is returned by GetClusterList for entries that are backed
 // by a fixed byte range rather than by clusters, namely $MBR, $FAT1 and $FAT2.
 // Use Entry.GetRegionOffset to locate those.

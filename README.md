@@ -103,14 +103,19 @@ The internal parser architecture and zero-copy boundaries are documented in
 ```sh
 └── libxfat/
     ├── README.md
+    ├── xfat.go
     ├── cluster.go
     ├── const.go
+    ├── dir.go
+    ├── dir_record.go
     ├── entry.go
-    ├── exfat.go
     ├── go.mod
     ├── go.sum
+    ├── reader.go
     ├── struct.go
+    ├── timestamp.go
     ├── util.go
+    ├── validators.go
     └── vbr.go
 ```
 
@@ -225,6 +230,40 @@ and virtual disk formats write a zero `PartitionOffset` regardless of where the
 volume actually sits, so this is a legitimate setting rather than an escape
 hatch — but it does discard one consistency signal.
 
+### Name Checksum Verification
+
+The other half of strict mode is verifying each directory entry set against the
+`EntrySetChecksum` recorded in its primary record. A mismatch means the set was
+damaged after it was written — a partial overwrite, a torn write, a record
+reused by a later file.
+
+A mismatch never costs you the name. The bytes on disk are what they are, and a
+name parsed out of a damaged set is still the only record of what the file was
+called, so it is always returned and the verdict travels alongside it:
+
+```go
+for _, entry := range entries {
+    if err := entry.NameChecksumError(); err != nil {
+        log.Printf("unverified: %v", err)   // entry.GetName() is still populated
+    }
+}
+```
+
+- `NameChecksumVerified()` — checked and matched.
+- `NameChecksumMismatch()` — checked and disagreed.
+- `NameChecksumError()` — the mismatch as an `error` wrapping
+  `ErrNameChecksumMismatch`, or `nil`.
+- `EntrySetChecksums()` — the recorded and computed values, plus whether the
+  comparison ran at all.
+
+Both predicates are false in optimistic mode, which keeps *not checked*
+distinguishable from *checked and passed*: a report cannot claim integrity it
+never tested.
+
+Set `Source.RejectChecksumMismatch` to drop mismatched entry sets outright. It
+only applies alongside `Strict`, and it is off by default — for most evidence
+work a damaged entry is more interesting than a missing one.
+
 ## Core API
 
 ### Open And Inspect
@@ -280,6 +319,9 @@ Each parsed directory item is represented by `Entry`. Common helpers include:
 - `IsRegion()` and `IsMetadataStream()`
 - `GetRegionOffset() (uint64, bool)`
 - `HasFatChain()` and `DoesNotHaveFatChain()`
+- `NameChecksumVerified()` and `NameChecksumMismatch()`
+- `NameChecksumError() error`
+- `EntrySetChecksums() (expected, computed uint16, checked bool)`
 
 ### Timestamps
 
@@ -451,10 +493,14 @@ See `IMPROVEMENTS.md` for a more detailed implementation summary.
 
 ```text
 .
-|-- exfat.go          # high-level filesystem operations
+|-- xfat.go           # entry point: package docs, Source, and the constructors
+|-- dir.go            # directory parsing, entry traversal, deleted-entry carving
 |-- vbr.go            # VBR parsing and volume metadata
 |-- cluster.go        # cluster traversal and content reads
+|-- reader.go         # bounds-checked reads against the backing io.ReaderAt
+|-- dir_record.go     # 32-byte directory record view
 |-- entry.go          # directory-entry formatting helpers
+|-- timestamp.go      # exFAT timestamp decoding
 |-- struct.go         # core ExFAT, VBR, and Entry types
 |-- util.go           # shared parsing and formatting helpers
 |-- validators.go     # exFAT directory-record validation helpers

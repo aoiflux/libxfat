@@ -34,6 +34,66 @@ func (e *ExFAT) resetSetAssembly() {
 	e.expectedSC = 0
 	e.expectedNameLen = 0
 	e.nameUnits = nil
+	e.setInUse = false
+	e.sawStream = false
+}
+
+// beginEntrySet starts assembling a new file entry set from its primary record.
+// The pending entry is cleared first: an earlier set that was abandoned partway
+// through - a truncated directory, a damaged secondary - would otherwise leave
+// its cluster and length behind for this one to inherit.
+func (e *ExFAT) beginEntrySet(rec dirRecordView) {
+	e.entry = Entry{}
+	e.resetSetAssembly()
+
+	e.setChecksum = exfatDirSetChecksumAdd(0, rec.data, true)
+	e.setInUse = entryInUse(rec.typeByte())
+	e.populateDirRecordDel(rec)
+	e.expectedSC = int(e.entry.secondaryCount)
+	e.expectedChecksum = uint16(rec.byteAt(2)) | (uint16(rec.byteAt(3)) << 8)
+}
+
+// secondaryBelongsToSet reports whether a secondary record's allocation state
+// agrees with the primary that opened the set. Type validation masks off the
+// in-use bit, so without this a 0x41 name record would be accepted into an
+// allocated 0x85 set, splicing a deleted name onto a live file.
+func (e *ExFAT) secondaryBelongsToSet(rec dirRecordView) bool {
+	return e.entryState == ENTRY_STATE_85_SEEN && entryInUse(rec.typeByte()) == e.setInUse
+}
+
+// finishEntrySet completes the pending entry set and appends it to entries.
+//
+// The assembled name is always stored. A checksum mismatch says the set is
+// damaged, which is a fact worth reporting about the entry - it is not a reason
+// to replace the only copy of the name with an empty string, which is what this
+// used to do in strict mode, silently rendering every entry on the volume
+// nameless and every directory unreadable.
+func (e *ExFAT) finishEntrySet(entries *[]Entry) {
+	if e.expectedNameLen > 0 && len(e.nameUnits) > e.expectedNameLen {
+		e.nameUnits = e.nameUnits[:e.expectedNameLen]
+	}
+
+	checked := !e.optimistic
+	verified := e.expectedChecksum == e.setChecksum
+
+	e.entry.name = utf16UnitsToString(e.nameUnits)
+	e.entry.nameChecksumChecked = checked
+	e.entry.nameChecksumVerified = verified
+	e.entry.expectedSetChecksum = e.expectedChecksum
+	e.entry.computedSetChecksum = e.setChecksum
+
+	if e.entry.IsDeleted() {
+		e.entry.name += DELETED
+	}
+
+	drop := checked && !verified && e.rejectChecksumMismatch
+	if !drop {
+		*entries = append(*entries, e.entry)
+	}
+
+	e.entry = Entry{}
+	e.entryState = ENTRY_STATE_LAST_C1_SEEN
+	e.resetSetAssembly()
 }
 
 func (e *ExFAT) clearParsedEntry() {
@@ -382,24 +442,22 @@ func (e *ExFAT) parseDeletedDirEntries(clusterdata []byte) []Entry {
 		if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
 			e.clearParsedEntry()
 			if e.validateFileDentry(rec.data) {
-				e.setChecksum = exfatDirSetChecksumAdd(0, rec.data, true)
-				e.populateDirRecordDel(rec)
-				e.expectedSC = int(e.entry.secondaryCount)
-				e.expectedChecksum = uint16(rec.byteAt(2)) | (uint16(rec.byteAt(3)) << 8)
+				e.beginEntrySet(rec)
 			}
 			continue
 		}
 
-		if (e.dirtype&0x7f) == EXFAT_DIRRECORD_DEL_STREAM_EXT && e.entryState == ENTRY_STATE_85_SEEN {
-			if e.validateFileStreamDentry(rec.data) {
+		if (e.dirtype&0x7f) == EXFAT_DIRRECORD_DEL_STREAM_EXT && e.secondaryBelongsToSet(rec) {
+			if !e.sawStream && e.validateFileStreamDentry(rec.data) {
 				e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec.data, false)
 				e.populateDirRecordStreamSeen(rec)
 				e.expectedNameLen = int(e.entry.nameLen)
+				e.sawStream = true
 			}
 			continue
 		}
 
-		if (e.dirtype&0x7f) == EXFAT_DIRRECORD_DEL_FILENAME_EXT && e.entryState == ENTRY_STATE_85_SEEN {
+		if (e.dirtype&0x7f) == EXFAT_DIRRECORD_DEL_FILENAME_EXT && e.secondaryBelongsToSet(rec) {
 			if !e.validateFileNameDentry(rec.data) {
 				continue
 			}
@@ -415,16 +473,14 @@ func (e *ExFAT) parseDeletedDirEntries(clusterdata []byte) []Entry {
 				continue
 			}
 
-			if e.expectedNameLen > 0 && len(e.nameUnits) > e.expectedNameLen {
-				e.nameUnits = e.nameUnits[:e.expectedNameLen]
+			// A set with no stream extension has no cluster, no length and no
+			// name length; emitting it would invent a file that is not there.
+			if !e.sawStream {
+				e.clearParsedEntry()
+				continue
 			}
-			if e.optimistic || e.expectedChecksum == e.setChecksum {
-				e.entry.name = utf16UnitsToString(e.nameUnits)
-			}
-			if e.entry.IsDeleted() {
-				e.entry.name += DELETED
-			}
-			entries = append(entries, e.entry)
+
+			e.finishEntrySet(&entries)
 			e.clearParsedEntry()
 		}
 	}
@@ -478,25 +534,24 @@ func (e *ExFAT) parseDirChunk(clusterdata []byte, entries *[]Entry) bool {
 		default:
 			if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
 				if e.validateFileDentry(rec.data) {
-					e.setChecksum = exfatDirSetChecksumAdd(0, rec.data, true)
-					e.populateDirRecordDel(rec)
-					e.expectedSC = int(e.entry.secondaryCount)
-					b0 := uint16(rec.byteAt(2))
-					b1 := uint16(rec.byteAt(3))
-					e.expectedChecksum = b0 | (b1 << 8)
-					e.expectedNameLen = 0
-					e.nameUnits = nil
+					e.beginEntrySet(rec)
 				}
 			}
 			if ((e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_STREAM_EXT) &&
-				(e.entryState == ENTRY_STATE_85_SEEN) {
-				if e.validateFileStreamDentry(rec.data) {
+				e.secondaryBelongsToSet(rec) {
+				if !e.sawStream && e.validateFileStreamDentry(rec.data) {
 					e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec.data, false)
 					e.populateDirRecordStreamSeen(rec)
 					e.expectedNameLen = int(e.entry.nameLen)
+					e.sawStream = true
 				}
 			}
-			if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILENAME_EXT {
+			// Name records are folded into the checksum only while a set is
+			// open. A stray 0xC1 outside one - slack, or a directory whose
+			// primary record was never parsed - would otherwise corrupt the
+			// running checksum and prepend its bytes to the next real name.
+			if ((e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILENAME_EXT) &&
+				e.secondaryBelongsToSet(rec) {
 				if e.validateFileNameDentry(rec.data) {
 					e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec.data, false)
 
@@ -504,27 +559,15 @@ func (e *ExFAT) parseDirChunk(clusterdata []byte, entries *[]Entry) bool {
 					units := utf16leUnitsFromBytes(raw, 15)
 					e.nameUnits = append(e.nameUnits, units...)
 
-					if (e.entryState == ENTRY_STATE_85_SEEN) && (e.remainingSC >= 1) {
+					if e.remainingSC >= 1 {
 						e.remainingSC--
 
 						if e.remainingSC == 0 {
-							if e.expectedNameLen > 0 && len(e.nameUnits) > e.expectedNameLen {
-								e.nameUnits = e.nameUnits[:e.expectedNameLen]
-							}
-							checksumOK := e.expectedChecksum == e.setChecksum
-							if e.optimistic || checksumOK {
-								e.entry.name = utf16UnitsToString(e.nameUnits)
+							if e.sawStream {
+								e.finishEntrySet(entries)
 							} else {
-								e.entry.name = ""
+								e.clearParsedEntry()
 							}
-							if e.entry.IsDeleted() {
-								e.entry.name += DELETED
-							}
-
-							*entries = append(*entries, e.entry)
-							e.entry = Entry{}
-							e.entryState = ENTRY_STATE_LAST_C1_SEEN
-							e.resetSetAssembly()
 						}
 					}
 				}

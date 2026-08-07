@@ -41,12 +41,43 @@ func FuzzParseDirChunk(f *testing.F) {
 	f.Add(seed)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		for _, optimistic := range []bool{true, false} {
-			exfat := ExFAT{optimistic: optimistic}
+		newParser := func(optimistic bool) *ExFAT {
+			exfat := &ExFAT{optimistic: optimistic}
 			exfat.vbr.nbClusters = 64
 			exfat.vbr.clusterSize = 512
-			_ = exfat.parseDir(data)
-			_ = exfat.parseDeletedDirEntries(data)
+			return exfat
+		}
+
+		// Verification decides what the library says about an entry set, never
+		// which entry sets it finds or what they are called. Holding the two
+		// modes against each other on arbitrary bytes is what makes that a
+		// property rather than a promise: the mode-dependent blank-on-mismatch
+		// path this replaced would fail here on almost any input.
+		optimistic := newParser(true).parseDir(data)
+		strict := newParser(false).parseDir(data)
+
+		if len(optimistic) != len(strict) {
+			t.Fatalf("optimistic parsed %d entries, strict %d", len(optimistic), len(strict))
+		}
+		for i := range strict {
+			if strict[i].name != optimistic[i].name {
+				t.Fatalf("entry %d: strict name %q, optimistic %q",
+					i, strict[i].name, optimistic[i].name)
+			}
+		}
+
+		optimisticDeleted := newParser(true).parseDeletedDirEntries(data)
+		strictDeleted := newParser(false).parseDeletedDirEntries(data)
+
+		if len(optimisticDeleted) != len(strictDeleted) {
+			t.Fatalf("optimistic carved %d deleted entries, strict %d",
+				len(optimisticDeleted), len(strictDeleted))
+		}
+		for i := range strictDeleted {
+			if strictDeleted[i].name != optimisticDeleted[i].name {
+				t.Fatalf("deleted entry %d: strict name %q, optimistic %q",
+					i, strictDeleted[i].name, optimisticDeleted[i].name)
+			}
 		}
 	})
 }
