@@ -69,6 +69,11 @@ func (e *ExFAT) secondaryBelongsToSet(rec dirRecordView) bool {
 // used to do in strict mode, silently rendering every entry on the volume
 // nameless and every directory unreadable.
 func (e *ExFAT) finishEntrySet(entries *[]Entry) {
+	// Name records are fixed at 15 code units each, so the last one is padded
+	// past the end of the name. A formatter zeroes that padding, but a record
+	// reused by a later, shorter name need not: NameLength is what says where
+	// the name actually stops, and without this the residue is read as part of
+	// it.
 	if e.expectedNameLen > 0 && len(e.nameUnits) > e.expectedNameLen {
 		e.nameUnits = e.nameUnits[:e.expectedNameLen]
 	}
@@ -176,19 +181,30 @@ func (e *ExFAT) ExtractAllFiles(rootEntries []Entry, dstdir string) error {
 	return nil
 }
 
+// GetFullPathIndexableEntries walks the tree below entries and returns the
+// indexable ones with their full paths composed, prefixed by path.
+//
+// Both decisions it makes about an entry - whether to index it, and whether to
+// descend into it - are taken before the name is rewritten. The synthetic
+// entries identify themselves by name, so "$MBR" turned into "/$MBR" stops
+// answering to IsVirtualEntry and reads as an ordinary invalid entry: composing
+// the path first silently dropped $MBR and $FAT1 from the results, which is why
+// this returned two fewer entries than GetIndexableEntries on the same volume.
 func (e *ExFAT) GetFullPathIndexableEntries(entries []Entry, path string) ([]Entry, error) {
 	var retentries []Entry
 
 	for _, entry := range entries {
-		entry.name = path + entry.name
-
-		if entry.IsIndexable() {
-			retentries = append(retentries, entry)
-		}
+		indexable := entry.IsIndexable()
 
 		subentries, err := e.ReadDir(entry)
 		if err != nil {
 			return nil, err
+		}
+
+		entry.name = path + entry.name
+
+		if indexable {
+			retentries = append(retentries, entry)
 		}
 
 		tempRet, err := e.GetFullPathIndexableEntries(subentries, entry.name+"/")

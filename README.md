@@ -298,6 +298,10 @@ subtree addressable; it is not evidence.
 - `GetAllEntries(rootEntries []Entry, indexable ...bool) ([]Entry, error)`
 - `GetFullPathIndexableEntries(entries []Entry, path string) ([]Entry, error)`
 
+`GetIndexableEntries` and `GetFullPathIndexableEntries` apply the same test to
+the same tree, so they select the same entries and differ only in whether paths
+are composed. The synthetic `$MBR` and `$FAT1` appear in both, at the root.
+
 ### Extract Data
 
 - `ExtractEntryContent(entry Entry, dstpath string) error`

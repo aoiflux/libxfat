@@ -89,7 +89,7 @@ func unicodeFromAscii(raw []byte, unicodeCharCount int) string {
 }
 
 // exfatDirSetChecksumAdd updates the running 16-bit checksum for a 32-byte
-// directory record, following EntrySetChecksum in section 6.3.2 of the exFAT
+// directory record, following EntrySetChecksum in section 6.3.3 of the exFAT
 // specification.
 //
 // For the first FILE directory entry in a set the checksum field (bytes 2 and

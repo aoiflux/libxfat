@@ -3,8 +3,12 @@ package libxfat
 import "testing"
 
 // specEntrySetChecksum is a literal transliteration of the EntrySetChecksum
-// routine in section 6.3.2 of the exFAT specification, computed over a whole
+// routine in section 6.3.3 of the exFAT specification, computed over a whole
 // entry set in one pass.
+//
+// Cross-checked against Linux's exfat_calc_chksum16 (fs/exfat/misc.c), which
+// skips the same two indices and uses the same rotate-and-add, written as
+// ((chksum << 15) | (chksum >> 1)) + byte.
 //
 // It is deliberately written from the specification rather than in terms of
 // exfatDirSetChecksumAdd. A checksum implementation checked only against itself
@@ -59,6 +63,48 @@ func TestExfatDirSetChecksumGoldenVector(t *testing.T) {
 
 	if got := libEntrySetChecksum(set); got != golden {
 		t.Fatalf("entry set checksum = 0x%04x, want 0x%04x", got, golden)
+	}
+}
+
+// kernelEntrySetChecksum is Linux's exfat_calc_chksum16 (fs/exfat/misc.c),
+// transliterated. It is an implementation independent of both this package and
+// the specification pseudocode, and it writes the rotation the other way round -
+// shift left by 15 or'd with shift right by 1 - so agreeing with it also rules
+// out having read the rotation backwards.
+func kernelEntrySetChecksum(data []byte, chksum uint16, dirEntry bool) uint16 {
+	for i := 0; i < len(data); i++ {
+		if dirEntry && (i == 2 || i == 3) {
+			continue
+		}
+		chksum = ((chksum << 15) | (chksum >> 1)) + uint16(data[i])
+	}
+	return chksum
+}
+
+func TestExfatDirSetChecksumMatchesKernel(t *testing.T) {
+	state := uint32(0xdeadbeef)
+	next := func() byte {
+		state = state*1664525 + 1013904223
+		return byte(state >> 24)
+	}
+
+	for trial := 0; trial < 2000; trial++ {
+		set := make([]byte, 3*EXFAT_DIRRECORD_SIZE)
+		for i := range set {
+			set[i] = next()
+		}
+		set[0] = EXFAT_DIRRECORD_FILEDIR
+		set[1] = 2
+
+		var kernel uint16
+		for offset := 0; offset < len(set); offset += EXFAT_DIRRECORD_SIZE {
+			kernel = kernelEntrySetChecksum(
+				set[offset:offset+EXFAT_DIRRECORD_SIZE], kernel, offset == 0)
+		}
+
+		if got := libEntrySetChecksum(set); got != kernel {
+			t.Fatalf("trial %d: checksum = 0x%04x, Linux computes 0x%04x", trial, got, kernel)
+		}
 	}
 }
 

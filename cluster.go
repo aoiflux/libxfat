@@ -341,6 +341,15 @@ func (v *VBR) countChainedClusters(cluster uint32) (int, error) {
 }
 
 func (v *VBR) countClusters(entry Entry) (int, error) {
+	// Region entries ($MBR, $FAT1, $FAT2) are byte ranges outside the cluster
+	// heap, so they have no clusters to count. Dividing their size by the
+	// cluster size produces a number that looks like an answer and refers to
+	// nothing - and contradicts getClusterList, which refuses them outright.
+	// Locate them with Entry.GetRegionOffset and GetSize instead.
+	if entry.isRegion {
+		return 0, ErrNoClusterMapping
+	}
+
 	if entry.dataLen == 0 {
 		return 0, nil
 	}

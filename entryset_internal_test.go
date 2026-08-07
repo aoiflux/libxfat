@@ -23,6 +23,10 @@ type testSet struct {
 	// nameRecordType overrides the type byte of the name records, so a test can
 	// splice a deleted name record into an allocated set.
 	nameRecordType byte
+	// namePad fills the name records' unused code units. Formatters zero this
+	// padding, but a record reused by a later, shorter name carries whatever the
+	// previous one left behind, and only NameLength says where the name stops.
+	namePad uint16
 }
 
 // buildEntrySet lays out a valid exFAT file entry set: one primary record, one
@@ -70,12 +74,12 @@ func buildEntrySet(s testSet) []byte {
 	for i := 0; i < nameRecords; i++ {
 		rec := set[(2+i)*EXFAT_DIRRECORD_SIZE : (3+i)*EXFAT_DIRRECORD_SIZE]
 		rec[0] = nameType
-		chunk := units[i*15:]
-		if len(chunk) > 15 {
-			chunk = chunk[:15]
-		}
-		for j, u := range chunk {
-			putLEShort(rec[2+j*2:4+j*2], u)
+		for j := 0; j < 15; j++ {
+			unit := s.namePad
+			if index := i*15 + j; index < len(units) {
+				unit = units[index]
+			}
+			putLEShort(rec[2+j*2:4+j*2], unit)
 		}
 	}
 
@@ -388,6 +392,62 @@ func TestParseDirRejectsDeletedNameInAllocatedSet(t *testing.T) {
 
 	if entries := newTestParser(true).parseDir(buildDir(set)); len(entries) != 0 {
 		t.Fatalf("parsed %d entries, want 0: a deleted name record joined an allocated set", len(entries))
+	}
+}
+
+// TestParseDirTruncatesNameToRecordedLength covers a name record whose padding
+// past the end of the name is not zeroed - the state a record is left in when a
+// longer name is overwritten by a shorter one. NameLength is the only thing that
+// says where the name stops; without honouring it the residue is read as part of
+// the name, and every path built from it is wrong.
+func TestParseDirTruncatesNameToRecordedLength(t *testing.T) {
+	const name = "twenty-char-name.txt" // exactly 20 units: 15 + 5, leaving 10 padded
+
+	dir := buildDir(buildEntrySet(testSet{
+		name:    name,
+		attrs:   ENTRY_ATTR_ATTR_MASK,
+		cluster: 5,
+		size:    10,
+		namePad: 'X',
+	}))
+
+	entries := newTestParser(true).parseDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("parsed %d entries, want 1", len(entries))
+	}
+	if got := entries[0].GetName(); got != name {
+		t.Fatalf("name = %q, want %q: padding past NameLength leaked into the name", got, name)
+	}
+	if !entries[0].NameChecksumVerified() {
+		t.Error("the padded set did not verify; the padding must be part of the checksum")
+	}
+	if got, want := entries[0].GetNameLength(), byte(len(name)); got != want {
+		t.Errorf("GetNameLength() = %d, want %d", got, want)
+	}
+}
+
+// TestParseDirTruncationSurvivesRecordBoundaries repeats the check at every name
+// length that leaves a partly-filled final record, since the boundary between
+// "name" and "residue" moves with it.
+func TestParseDirTruncationSurvivesRecordBoundaries(t *testing.T) {
+	for length := 1; length <= 45; length++ {
+		name := strings.Repeat("n", length)
+
+		dir := buildDir(buildEntrySet(testSet{
+			name:    name,
+			attrs:   ENTRY_ATTR_ATTR_MASK,
+			cluster: 5,
+			size:    10,
+			namePad: 'Z',
+		}))
+
+		entries := newTestParser(true).parseDir(dir)
+		if len(entries) != 1 {
+			t.Fatalf("length %d: parsed %d entries, want 1", length, len(entries))
+		}
+		if got := entries[0].GetName(); got != name {
+			t.Fatalf("length %d: name = %q, want %q", length, got, name)
+		}
 	}
 }
 
