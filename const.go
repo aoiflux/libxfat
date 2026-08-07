@@ -87,6 +87,9 @@ const (
 	FAT2        = "$FAT2"
 	ORPHANFILES = "$OrphanFiles"
 	EOF         = "EOF"
+	// UNNAMED prefixes the placeholder given to an entry whose name records
+	// carried no usable characters. See Entry.HasSyntheticName.
+	UNNAMED = "$Unnamed"
 )
 
 const ZERO_ENTRY_CLUSTER = 0x0

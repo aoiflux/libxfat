@@ -40,6 +40,14 @@
 // you the parsed name - see Entry.NameChecksumMismatch - unless you ask for
 // that explicitly with Source.RejectChecksumMismatch.
 //
+// # Names
+//
+// A name is never silently lost. Where an entry set carries no usable name at
+// all, a placeholder keyed to its first cluster stands in, so the entry and
+// anything beneath it stay reachable, and Entry.HasSyntheticName says so.
+// Anywhere a name is shown to a person, check that first: the placeholder is
+// the library's invention rather than something read off the volume.
+//
 // # Concurrency
 //
 // Several volumes may share one Reader concurrently, provided the Reader itself

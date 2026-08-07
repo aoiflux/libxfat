@@ -264,6 +264,27 @@ Set `Source.RejectChecksumMismatch` to drop mismatched entry sets outright. It
 only applies alongside `Strict`, and it is off by default — for most evidence
 work a damaged entry is more interesting than a missing one.
 
+### Entries With No Name
+
+An entry set whose name records decode to nothing — absent, or all NUL — leaves
+the entry with no name at all. That is worse than it sounds: traversal treats a
+nameless directory as unreadable, so everything beneath it drops out of a walk
+without an error.
+
+Entries are located by cluster, not by name, so nothing has to be lost. Such an
+entry is given a placeholder keyed to its first cluster, `$Unnamed-<cluster>`,
+which is stable between runs and distinct between siblings, and it reports
+`HasSyntheticName()`:
+
+```go
+if entry.HasSyntheticName() {
+    // GetName() is the library's invention, not a name off the volume.
+}
+```
+
+Check it anywhere a name reaches a person or a report. The placeholder keeps the
+subtree addressable; it is not evidence.
+
 ## Core API
 
 ### Open And Inspect
@@ -322,6 +343,7 @@ Each parsed directory item is represented by `Entry`. Common helpers include:
 - `NameChecksumVerified()` and `NameChecksumMismatch()`
 - `NameChecksumError() error`
 - `EntrySetChecksums() (expected, computed uint16, checked bool)`
+- `HasSyntheticName()`
 
 ### Timestamps
 

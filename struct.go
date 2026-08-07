@@ -76,6 +76,9 @@ type Entry struct {
 	nameChecksumVerified bool
 	expectedSetChecksum  uint16
 	computedSetChecksum  uint16
+	// nameSynthetic marks an entry whose name records held nothing usable, so
+	// the library supplied a placeholder rather than leaving it unaddressable.
+	nameSynthetic bool
 }
 
 func (e Entry) IsInvalid() bool {
@@ -177,6 +180,19 @@ func (e Entry) NameChecksumError() error {
 // the verdict.
 func (e Entry) EntrySetChecksums() (expected, computed uint16, checked bool) {
 	return e.expectedSetChecksum, e.computedSetChecksum, e.nameChecksumChecked
+}
+
+// HasSyntheticName reports whether GetName returns a placeholder the library
+// supplied rather than a name read off the volume. It is set when an entry set's
+// name records carry no usable characters at all.
+//
+// The alternative - leaving the name empty - loses the entry: a directory with
+// no name is treated as unreadable, so everything beneath it silently vanishes
+// from a walk. Entries are located by cluster, so the placeholder costs nothing
+// and keeps the subtree addressable. Anything reporting a name to a person
+// should check this, because the name is the library's invention, not evidence.
+func (e Entry) HasSyntheticName() bool {
+	return e.nameSynthetic
 }
 
 func (e Entry) GetNameLength() byte {

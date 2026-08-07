@@ -50,7 +50,19 @@ const (
 	sfFragmentCluster2 = 14
 	sfUnicodeCluster   = 15
 	sfErasedCluster    = 16
+	sfNamelessCluster  = 17 // a directory whose name records are all NUL
+	sfBuriedCluster    = 18 // its child, reachable only by traversing it
+	sfLastUsedCluster  = sfBuriedCluster
 )
+
+// sfNamelessName is a name made only of NUL code units: the records are present
+// and the length is honest, but nothing decodes. Left unnamed, the directory
+// would be treated as unreadable and everything under it would vanish.
+const sfNamelessName = "\x00\x00"
+
+// sfUnnamedDirName is the placeholder the library is expected to substitute:
+// the $Unnamed prefix keyed to the entry's first cluster.
+const sfUnnamedDirName = "$Unnamed-17"
 
 const (
 	sfLongName    = "a-deliberately-long-file-name-that-spans-several-name-records.txt"
@@ -163,7 +175,7 @@ func buildSuperfloppyImage() []byte {
 	}
 	binary.LittleEndian.PutUint32(fat[0:4], 0xfffffff8)
 	binary.LittleEndian.PutUint32(fat[4:8], 0xffffffff)
-	for cluster := uint32(sfRootCluster); cluster <= sfErasedCluster; cluster++ {
+	for cluster := uint32(sfRootCluster); cluster <= sfLastUsedCluster; cluster++ {
 		setFat(cluster, 0xffffffff)
 	}
 	// The one genuinely fragmented file.
@@ -177,7 +189,7 @@ func buildSuperfloppyImage() []byte {
 
 	// --- Allocation bitmap: clusters 2..16 are in use ---
 	bitmap := clusterAt(sfBitmapCluster)
-	for cluster := uint32(sfRootCluster); cluster <= sfErasedCluster; cluster++ {
+	for cluster := uint32(sfRootCluster); cluster <= sfLastUsedCluster; cluster++ {
 		index := cluster - 2
 		bitmap[index/8] |= 1 << (index % 8)
 	}
@@ -235,15 +247,24 @@ func buildSuperfloppyImage() []byte {
 	offset = appendRecords(docs, offset, sfBuildEntrySet(sfEntrySet{
 		name: "notes.txt", attrs: 0x20, cluster: sfNotesCluster, size: 50, noFatChain: true,
 	}))
-	appendRecords(docs, offset, sfBuildEntrySet(sfEntrySet{
+	offset = appendRecords(docs, offset, sfBuildEntrySet(sfEntrySet{
 		name: "erased.txt", attrs: 0x20, cluster: sfErasedCluster, size: 64,
 		noFatChain: true, deleted: true,
+	}))
+	appendRecords(docs, offset, sfBuildEntrySet(sfEntrySet{
+		name: sfNamelessName, attrs: 0x10, cluster: sfNamelessCluster, size: sfClusterSize,
 	}))
 
 	// --- /docs/nested ---
 	nested := clusterAt(sfNestedCluster)
 	appendRecords(nested, 0, sfBuildEntrySet(sfEntrySet{
 		name: "deep.bin", attrs: 0x20, cluster: sfDeepCluster, size: 5000, noFatChain: true,
+	}))
+
+	// --- /docs/<nameless> ---
+	nameless := clusterAt(sfNamelessCluster)
+	appendRecords(nameless, 0, sfBuildEntrySet(sfEntrySet{
+		name: "buried.txt", attrs: 0x20, cluster: sfBuriedCluster, size: 33, noFatChain: true,
 	}))
 
 	// --- File content, so extraction has something recognisable to read ---
@@ -254,6 +275,7 @@ func buildSuperfloppyImage() []byte {
 		sfNotesCluster:    'N',
 		sfDeepCluster:     'D',
 		sfFragmentCluster: 'F',
+		sfBuriedCluster:   'B',
 	} {
 		data := clusterAt(cluster)
 		for i := range data {
@@ -345,8 +367,9 @@ func TestSuperfloppyStrictYieldsNames(t *testing.T) {
 
 	want := []string{
 		"$BitMap", "$FAT1", "$MBR", "$OrphanFiles", "$UpCase",
-		"deep.bin", "docs", "erased.txt (deleted)", "fragmented.bin",
-		"nested", "notes.txt", "readme.txt", sfLongName, sfUnicodeName,
+		"buried.txt", "deep.bin", "docs", "erased.txt (deleted)",
+		"fragmented.bin", "nested", "notes.txt", "readme.txt",
+		sfUnnamedDirName, sfLongName, sfUnicodeName,
 	}
 	sort.Strings(want)
 
@@ -416,6 +439,7 @@ func TestSuperfloppyFullPathsAreComposed(t *testing.T) {
 	optimistic := collectFullPaths(t, openSuperfloppy(t, false))
 
 	want := []string{
+		"/docs/" + sfUnnamedDirName + "/buried.txt",
 		"/docs/nested/deep.bin",
 		"/docs/notes.txt",
 		"/readme.txt",
@@ -459,6 +483,59 @@ func TestSuperfloppyStrictVerifiesChecksums(t *testing.T) {
 		}
 		if !entry.NameChecksumVerified() {
 			t.Errorf("%q did not verify: %v", entry.GetName(), entry.NameChecksumError())
+		}
+	}
+}
+
+// TestSuperfloppyNamelessDirectoryKeepsItsSubtree covers the failure mode that
+// made the original bug so quiet: traversal treats a directory with no name as
+// unreadable, so anything below it disappears without an error. A directory is
+// found by its cluster, not its name, so the library substitutes a placeholder
+// and keeps going - and says so, because the placeholder is not evidence.
+func TestSuperfloppyNamelessDirectoryKeepsItsSubtree(t *testing.T) {
+	entries := collectAll(t, openSuperfloppy(t, true))
+
+	var nameless, buried, found bool
+	for _, entry := range entries {
+		switch entry.GetName() {
+		case sfUnnamedDirName:
+			nameless = true
+			if !entry.HasSyntheticName() {
+				t.Error("the placeholder name is not reported as synthetic")
+			}
+			if !entry.IsDir() {
+				t.Error("the unnamed entry lost its directory attribute")
+			}
+			if entry.GetEntryCluster() != sfNamelessCluster {
+				t.Errorf("unnamed directory cluster = %d, want %d",
+					entry.GetEntryCluster(), sfNamelessCluster)
+			}
+		case "buried.txt":
+			buried = true
+			if entry.HasSyntheticName() {
+				t.Error("buried.txt has a real name but is reported as synthetic")
+			}
+			if entry.GetSize() != 33 {
+				t.Errorf("buried.txt size = %d, want 33", entry.GetSize())
+			}
+		}
+	}
+	found = nameless && buried
+
+	if !nameless {
+		t.Errorf("the nameless directory is missing; got %q", sortedNames(entries))
+	}
+	if !buried {
+		t.Error("buried.txt was lost: the nameless directory truncated its subtree")
+	}
+	if !found {
+		return
+	}
+
+	// Every other entry on the volume has a real name and must not be flagged.
+	for _, entry := range entries {
+		if entry.GetName() != sfUnnamedDirName && entry.HasSyntheticName() {
+			t.Errorf("%q is wrongly reported as having a synthetic name", entry.GetName())
 		}
 	}
 }

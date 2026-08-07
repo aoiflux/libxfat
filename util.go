@@ -130,6 +130,16 @@ func utf16leUnitsFromBytes(raw []byte, maxUnits int) []uint16 {
 	return units
 }
 
+// unnamedEntryName builds the placeholder for an entry that carries no name on
+// disk. Keying it to the first cluster keeps it stable between runs and distinct
+// between siblings, so a report or an extraction tree can address the entry.
+func unnamedEntryName(cluster uint32) string {
+	if cluster == 0 {
+		return UNNAMED
+	}
+	return fmt.Sprintf("%s-%d", UNNAMED, cluster)
+}
+
 // utf16UnitsToString decodes UTF-16 code units to a UTF-8 string, skipping NULs.
 func utf16UnitsToString(units []uint16) string {
 	if len(units) == 0 {

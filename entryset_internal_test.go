@@ -391,6 +391,71 @@ func TestParseDirRejectsDeletedNameInAllocatedSet(t *testing.T) {
 	}
 }
 
+// TestParseDirSubstitutesPlaceholderForNamelessSet covers an entry set whose
+// name records decode to nothing. An empty name makes a directory look
+// unreadable to NonParsable, so its whole subtree would be dropped silently;
+// the entry is located by cluster, so a placeholder keeps it addressable.
+func TestParseDirSubstitutesPlaceholderForNamelessSet(t *testing.T) {
+	dir := buildDir(
+		// Name records present, length honest, but every code unit is NUL.
+		buildEntrySet(testSet{name: "\x00\x00", attrs: ENTRY_ATTR_DIR_MASK, cluster: 42, size: 4096}),
+		buildEntrySet(testSet{name: "named.txt", attrs: ENTRY_ATTR_ATTR_MASK, cluster: 43, size: 10}),
+	)
+
+	entries := newTestParser(true).parseDir(dir)
+	if len(entries) != 2 {
+		t.Fatalf("parsed %d entries, want 2", len(entries))
+	}
+
+	nameless := entries[0]
+	if got, want := nameless.GetName(), UNNAMED+"-42"; got != want {
+		t.Fatalf("nameless entry name = %q, want %q", got, want)
+	}
+	if !nameless.HasSyntheticName() {
+		t.Error("placeholder name is not reported as synthetic")
+	}
+	if nameless.HasNoName() {
+		t.Error("placeholder entry still reports HasNoName, so traversal will skip it")
+	}
+	if nameless.NonParsable() {
+		t.Error("placeholder directory is still NonParsable, so its subtree is lost")
+	}
+	if !nameless.NameChecksumVerified() {
+		t.Error("substituting the name disturbed checksum verification")
+	}
+
+	named := entries[1]
+	if named.HasSyntheticName() {
+		t.Error("an entry with a real name is reported as synthetic")
+	}
+}
+
+// TestParseDirPlaceholderIsStableAndDistinct keeps the placeholder useful as a
+// path component: two nameless siblings must not collide, and the same entry
+// must produce the same name on every run.
+func TestParseDirPlaceholderIsStableAndDistinct(t *testing.T) {
+	dir := buildDir(
+		buildEntrySet(testSet{name: "\x00", attrs: ENTRY_ATTR_DIR_MASK, cluster: 7, size: 4096}),
+		buildEntrySet(testSet{name: "\x00", attrs: ENTRY_ATTR_DIR_MASK, cluster: 8, size: 4096}),
+	)
+
+	first := newTestParser(true).parseDir(dir)
+	second := newTestParser(true).parseDir(dir)
+
+	if len(first) != 2 {
+		t.Fatalf("parsed %d entries, want 2", len(first))
+	}
+	if first[0].GetName() == first[1].GetName() {
+		t.Fatalf("both nameless siblings are called %q", first[0].GetName())
+	}
+	for i := range first {
+		if first[i].GetName() != second[i].GetName() {
+			t.Errorf("entry %d: %q on the first pass, %q on the second",
+				i, first[i].GetName(), second[i].GetName())
+		}
+	}
+}
+
 // TestParseDirDeletedSetKeepsNameInStrictMode covers the carving path, which
 // had the same blank-on-mismatch behaviour as the allocated one.
 func TestParseDirDeletedSetKeepsNameInStrictMode(t *testing.T) {

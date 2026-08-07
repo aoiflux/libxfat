@@ -76,7 +76,20 @@ func (e *ExFAT) finishEntrySet(entries *[]Entry) {
 	checked := !e.optimistic
 	verified := e.expectedChecksum == e.setChecksum
 
-	e.entry.name = utf16UnitsToString(e.nameUnits)
+	name := utf16UnitsToString(e.nameUnits)
+
+	// A set whose name records are empty or all NUL leaves nothing to call the
+	// entry by, and a directory with no name is treated as unreadable, so the
+	// whole subtree below it would disappear without a word. An entry is located
+	// by its cluster, not by its name, so there is no reason to lose it: stand a
+	// placeholder in, keyed to the cluster so it is stable across runs, and
+	// record that the name did not come off the disk.
+	if name == "" {
+		name = unnamedEntryName(e.entry.entryCluster)
+		e.entry.nameSynthetic = true
+	}
+
+	e.entry.name = name
 	e.entry.nameChecksumChecked = checked
 	e.entry.nameChecksumVerified = verified
 	e.entry.expectedSetChecksum = e.expectedChecksum
