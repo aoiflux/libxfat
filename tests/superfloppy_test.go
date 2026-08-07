@@ -759,6 +759,105 @@ func TestSuperfloppyCountClustersAgreesWithClusterList(t *testing.T) {
 	}
 }
 
+// TestSuperfloppyNameHashesVerify checks every entry against the hash the
+// volume recorded for it, using the volume's own up-case table.
+func TestSuperfloppyNameHashesVerify(t *testing.T) {
+	fs := openSuperfloppy(t, true)
+
+	root, err := fs.ReadRootDir()
+	if err != nil {
+		t.Fatalf("ReadRootDir: %v", err)
+	}
+	all, err := fs.GetAllEntries(root)
+	if err != nil {
+		t.Fatalf("GetAllEntries: %v", err)
+	}
+
+	var checked int
+	for _, entry := range all {
+		err := fs.VerifyNameHash(entry)
+		if errors.Is(err, libxfat.ErrNoNameHash) {
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", entry.GetName(), err)
+			continue
+		}
+		checked++
+	}
+
+	if checked == 0 {
+		t.Fatal("no entries carried a name hash; the check proved nothing")
+	}
+	t.Logf("%d name hashes verified", checked)
+}
+
+// TestSuperfloppyDetectsCorruptNameHash flips one recorded hash in the image and
+// confirms only that entry is reported.
+//
+// The corruption is applied to the bytes rather than built into the fixture, so
+// the fixture stays conformant enough for a third-party checker to bless it -
+// see TestWriteSuperfloppyFixture.
+func TestSuperfloppyDetectsCorruptNameHash(t *testing.T) {
+	image := buildSuperfloppyImage()
+
+	// Root directory layout: label, bitmap, upcase, then readme.txt's entry
+	// set. Its stream extension is the fifth record, and NameHash sits at
+	// offset 4 within it.
+	rootStart := sfHeapOffsetSector * sfSectorSize
+	stream := rootStart + 4*32
+	if image[stream] != 0xC0 {
+		t.Fatalf("expected a stream extension at record 4, found type 0x%02x", image[stream])
+	}
+	image[stream+4] ^= 0xFF
+
+	path := filepath.Join(t.TempDir(), "corrupt.exfat")
+	if err := os.WriteFile(path, image, 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open image: %v", err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+
+	fs, err := libxfat.Open(libxfat.Source{
+		Reader: file, Size: int64(len(image)), Strict: true, IgnorePartitionOffset: true,
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	root, err := fs.ReadRootDir()
+	if err != nil {
+		t.Fatalf("ReadRootDir: %v", err)
+	}
+	all, err := fs.GetAllEntries(root)
+	if err != nil {
+		t.Fatalf("GetAllEntries: %v", err)
+	}
+
+	var mismatched []string
+	for _, entry := range all {
+		if err := fs.VerifyNameHash(entry); errors.Is(err, libxfat.ErrNameHashMismatch) {
+			mismatched = append(mismatched, entry.GetName())
+		}
+	}
+
+	if len(mismatched) != 1 || mismatched[0] != "readme.txt" {
+		t.Fatalf("mismatched entries = %q, want exactly [readme.txt]", mismatched)
+	}
+
+	// The entry set checksum still covers the corrupted byte, so the two checks
+	// should disagree in the expected direction: this is precisely the case the
+	// hash catches and a caller may want to see.
+	for _, entry := range all {
+		if entry.GetName() == "readme.txt" && entry.NameChecksumVerified() {
+			t.Error("the set checksum still verifies over a byte that was changed")
+		}
+	}
+}
+
 // TestSuperfloppyNamelessDirectoryKeepsItsSubtree covers the failure mode that
 // made the original bug so quiet: traversal treats a directory with no name as
 // unreadable, so anything below it disappears without an error. A directory is

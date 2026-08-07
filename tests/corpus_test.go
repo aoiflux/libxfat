@@ -384,6 +384,116 @@ func TestCorpusRecoverDeleted(t *testing.T) {
 	}
 }
 
+// TestCorpusUpcaseTable reads each volume's own up-case table and checks the
+// folding it produces. Real formatters write the table compressed, collapsing
+// the identity runs that cover most of Unicode, so this is the only place the
+// decompression meets input it did not write itself.
+//
+// The expectations are deliberately narrow: ASCII case folding, which every
+// exFAT up-case table performs, and stability of characters that have no upper
+// case. Anything broader would be asserting a particular Unicode version rather
+// than the volume's own table.
+func TestCorpusUpcaseTable(t *testing.T) {
+	for _, path := range corpusImages(t) {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fs, _, ok := openCorpusImage(t, path)
+			if !ok {
+				return
+			}
+			if _, err := fs.ReadRootDir(); err != nil {
+				t.Fatalf("ReadRootDir(): %v", err)
+			}
+
+			for _, tc := range []struct{ in, want string }{
+				{"readme.txt", "README.TXT"},
+				{"MiXeD", "MIXED"},
+				{"ALREADY", "ALREADY"},
+				{"1234-_.", "1234-_."},
+			} {
+				got, err := fs.UpcaseString(tc.in)
+				if err != nil {
+					t.Fatalf("UpcaseString(%q): %v", tc.in, err)
+				}
+				if got != tc.want {
+					t.Errorf("UpcaseString(%q) = %q, want %q", tc.in, got, tc.want)
+				}
+			}
+
+			// Folding must be idempotent and case-insensitive, whatever the
+			// table happens to contain.
+			for _, name := range []string{"readme.txt", "Ünïcödé.bin", "emoji-\U0001F600"} {
+				once, err := fs.UpcaseString(name)
+				if err != nil {
+					t.Fatalf("UpcaseString(%q): %v", name, err)
+				}
+				twice, err := fs.UpcaseString(once)
+				if err != nil {
+					t.Fatalf("UpcaseString(%q): %v", once, err)
+				}
+				if once != twice {
+					t.Errorf("folding %q is not idempotent: %q then %q", name, once, twice)
+				}
+
+				lower, err := fs.NameHash(name)
+				if err != nil {
+					t.Fatalf("NameHash(%q): %v", name, err)
+				}
+				upper, err := fs.NameHash(once)
+				if err != nil {
+					t.Fatalf("NameHash(%q): %v", once, err)
+				}
+				if lower != upper {
+					t.Errorf("%q and its folded form %q hash differently: 0x%04x vs 0x%04x",
+						name, once, lower, upper)
+				}
+			}
+		})
+	}
+}
+
+// TestCorpusNameHashes verifies every entry's recorded name hash against the
+// volume's own table. A formatter has no reason to write one that disagrees, so
+// any mismatch here is either damage in the image or a defect in this library.
+func TestCorpusNameHashes(t *testing.T) {
+	for _, path := range corpusImages(t) {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fs, _, ok := openCorpusImage(t, path)
+			if !ok {
+				return
+			}
+			root, err := fs.ReadRootDir()
+			if err != nil {
+				t.Fatalf("ReadRootDir(): %v", err)
+			}
+			all, err := fs.GetAllEntries(root)
+			if err != nil {
+				t.Fatalf("GetAllEntries(): %v", err)
+			}
+
+			var checked, mismatched, skipped int
+			for _, entry := range all {
+				err := fs.VerifyNameHash(entry)
+				switch {
+				case errors.Is(err, libxfat.ErrNoNameHash):
+					skipped++
+				case errors.Is(err, libxfat.ErrNameHashMismatch):
+					mismatched++
+					if mismatched <= 5 {
+						t.Errorf("%v", err)
+					}
+				case err != nil:
+					t.Fatalf("%s: VerifyNameHash(): %v", entry.GetName(), err)
+				default:
+					checked++
+				}
+			}
+
+			t.Logf("%d name hashes verified, %d mismatched, %d entries carry none",
+				checked, mismatched, skipped)
+		})
+	}
+}
+
 // openCorpusImageOptimistic opens the same volume with verification off, so a
 // test can compare the two readings of one image.
 func openCorpusImageOptimistic(t *testing.T, path string) (libxfat.ExFAT, bool) {

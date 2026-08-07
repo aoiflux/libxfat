@@ -82,6 +82,7 @@ func (e *ExFAT) finishEntrySet(entries *[]Entry) {
 	verified := e.expectedChecksum == e.setChecksum
 
 	name := utf16UnitsToString(e.nameUnits)
+	e.entry.rawName = name
 
 	// A set whose name records are empty or all NUL leaves nothing to call the
 	// entry by, and a directory with no name is treated as unreadable, so the
@@ -651,6 +652,9 @@ func (e *ExFAT) populateRecordBitmapUpcase(rec dirRecordView) {
 		e.vbr.upcaseCluster = entryCluster
 		e.vbr.upcaseLength = dataLen
 		e.virtualEntry.name = UPCASE
+		e.vbr.upcaseEntry = e.virtualEntry
+		// A table read earlier belongs to a different volume state.
+		e.vbr.upcaseTable = nil
 	}
 }
 func (e *ExFAT) populateDirRecordDel(rec dirRecordView) {
@@ -675,6 +679,7 @@ func (e *ExFAT) populateDirRecordDel(rec dirRecordView) {
 }
 func (e *ExFAT) populateDirRecordStreamSeen(rec dirRecordView) {
 	e.entry.nameLen = rec.byteAt(3)
+	e.entry.nameHash = rec.le16(4)
 	e.entry.readNameLen = 0
 	e.entry.entryCluster = rec.le32(20)
 	e.entry.dataLen = rec.le64(24)

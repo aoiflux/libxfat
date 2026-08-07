@@ -133,6 +133,24 @@ var ErrNoContent = errors.New("entry has no recoverable content")
 // Reach it through Entry.NameChecksumError, and test with errors.Is.
 var ErrNameChecksumMismatch = errors.New("file name entry set checksum mismatch")
 
+// ErrNameHashMismatch reports that an entry's name does not hash to the value
+// recorded alongside it in the stream extension entry. It is a statement about
+// the name specifically, and independent of the entry set checksum: a set can
+// satisfy one and fail the other.
+//
+// Reach it through ExFAT.VerifyNameHash, and test with errors.Is.
+var ErrNameHashMismatch = errors.New("file name hash mismatch")
+
+// ErrNoNameHash is returned by VerifyNameHash for entries that are not file
+// entry sets and so record no name hash: the synthetic $MBR, $FAT1 and $FAT2,
+// and the $BitMap and $UpCase streams.
+var ErrNoNameHash = errors.New("entry records no name hash")
+
+// ErrUpcaseTableNotFound is returned when the volume's up-case table cannot be
+// located or read. Name hashing is defined in terms of that table, so without
+// it the hash cannot be checked at all.
+var ErrUpcaseTableNotFound = errors.New("up-case table not found")
+
 // ErrNoClusterMapping is returned by GetClusterList for entries that are backed
 // by a fixed byte range rather than by clusters, namely $MBR, $FAT1 and $FAT2.
 // Use Entry.GetRegionOffset to locate those.

@@ -38,6 +38,11 @@ type VBR struct {
 	upcaseCluster  uint32
 	upcaseLength   uint64
 	bitmapEntry    Entry
+	upcaseEntry    Entry
+	// upcaseTable is the volume's up-case table, decompressed, indexed by code
+	// unit. It is loaded on demand because only name hashing needs it. Units at
+	// or past its end map to themselves.
+	upcaseTable []uint16
 }
 
 type Entry struct {
@@ -79,6 +84,14 @@ type Entry struct {
 	// nameSynthetic marks an entry whose name records held nothing usable, so
 	// the library supplied a placeholder rather than leaving it unaddressable.
 	nameSynthetic bool
+	// rawName is the name exactly as decoded from the name records, before any
+	// decoration: no deleted marker, no placeholder, no path prefix. Verifying
+	// the name hash needs the name the volume actually recorded, and callers
+	// routinely rewrite name into a full path.
+	rawName string
+	// nameHash is the hash of the up-cased name recorded in the stream
+	// extension entry.
+	nameHash uint16
 }
 
 func (e Entry) IsInvalid() bool {
@@ -193,6 +206,20 @@ func (e Entry) EntrySetChecksums() (expected, computed uint16, checked bool) {
 // should check this, because the name is the library's invention, not evidence.
 func (e Entry) HasSyntheticName() bool {
 	return e.nameSynthetic
+}
+
+// RecordedNameHash returns the name hash stored in the entry's stream extension
+// entry, and whether the entry records one at all. Use ExFAT.VerifyNameHash to
+// check it, which needs the volume's up-case table.
+func (e Entry) RecordedNameHash() (uint16, bool) {
+	return e.nameHash, e.etype == EXFAT_DIRRECORD_FILEDIR && !e.IsSpecialFile()
+}
+
+// GetRawName returns the name exactly as recorded on the volume, without the
+// deleted marker, the placeholder given to a nameless entry, or any path a
+// caller has composed onto GetName.
+func (e Entry) GetRawName() string {
+	return e.rawName
 }
 
 func (e Entry) GetNameLength() byte {

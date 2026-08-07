@@ -264,6 +264,37 @@ Set `Source.RejectChecksumMismatch` to drop mismatched entry sets outright. It
 only applies alongside `Strict`, and it is off by default — for most evidence
 work a damaged entry is more interesting than a missing one.
 
+### Name Hash Verification
+
+Alongside the entry set checksum, each file entry set records a hash of its own
+up-cased name. The two are independent statements about the same bytes, and they
+can disagree — a name rewritten in place with the checksum recomputed but the
+hash left stale passes one and fails the other. For evidence work, that
+disagreement is the interesting part:
+
+```go
+switch err := fs.VerifyNameHash(entry); {
+case errors.Is(err, libxfat.ErrNoNameHash):
+    // Not a file entry set — $MBR, $BitMap and friends record no hash.
+case errors.Is(err, libxfat.ErrNameHashMismatch):
+    log.Printf("name does not match its recorded hash: %v", err)
+case err != nil:
+    log.Printf("could not check: %v", err)   // e.g. ErrUpcaseTableNotFound
+}
+```
+
+Hashing is defined in terms of the volume's own up-case table, not Unicode's
+rules or `strings.ToUpper` — the hash was computed with that table, so anything
+else yields mismatches that mean nothing. The table is read from the volume on
+demand and exposed directly, since "equal names" in exFAT means whatever the
+volume says it means:
+
+- `UpcaseString(s string) (string, error)` — fold through the volume's table.
+- `NameHash(name string) (uint16, error)` — the hash the volume would record.
+- `Entry.RecordedNameHash() (uint16, bool)` — the stored value.
+- `Entry.GetRawName()` — the name as recorded, without the deleted marker, the
+  placeholder for a nameless entry, or any composed path.
+
 ### Entries With No Name
 
 An entry set whose name records decode to nothing — absent, or all NUL — leaves
@@ -314,6 +345,9 @@ are composed. The synthetic `$MBR` and `$FAT1` appear in both, at the root.
 ### Volume Statistics
 
 - `GetVolumeLabel() string`
+- `UpcaseString(s string) (string, error)`
+- `NameHash(name string) (uint16, error)`
+- `VerifyNameHash(entry Entry) error`
 - `GetClusterSize() uint64`
 - `GetAllocatedClusters() (uint32, error)`
 - `GetFreeClusters() (uint32, error)`
@@ -348,6 +382,8 @@ Each parsed directory item is represented by `Entry`. Common helpers include:
 - `NameChecksumError() error`
 - `EntrySetChecksums() (expected, computed uint16, checked bool)`
 - `HasSyntheticName()`
+- `GetRawName()`
+- `RecordedNameHash() (uint16, bool)`
 
 ### Timestamps
 
