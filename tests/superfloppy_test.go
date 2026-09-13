@@ -226,8 +226,15 @@ func sfBuildEntrySet(s sfEntrySet) []byte {
 	if s.deleted {
 		stream[0] = 0x40
 	}
+	// GeneralSecondaryFlags. Bit 0 is AllocationPossible, which every stream
+	// extension naming a first cluster has to set; bit 1 is NoFatChain. Real
+	// formatters write 0x01 for a chained stream and 0x03 for a contiguous one,
+	// and an independent parser reads bit 0 to decide whether FirstCluster means
+	// anything at all - so leaving it clear made the whole fixture non-conformant
+	// while libxfat, which only ever tested bit 1, read it happily.
+	stream[1] = 0x01
 	if s.noFatChain {
-		stream[1] = 0x02
+		stream[1] |= libxfat.NOT_FAT_CHAIN_FLAG
 	}
 	stream[3] = byte(len(units))
 	binary.LittleEndian.PutUint16(stream[4:6], sfNameHash(s.name))
@@ -504,21 +511,30 @@ func buildSuperfloppyImage() []byte {
 // TestWriteSuperfloppyFixture writes the fixture out for an independent
 // implementation to audit. The fixture is hand-built by this package, so the
 // parser tests only prove the parser agrees with the builder - if both share a
-// misreading of the on-disk format, everything still passes. Handing the image
-// to a third-party checker is what breaks that circle:
+// misreading of the on-disk format, everything still passes. Handing the image to
+// an implementation that shares no code with this one is what breaks that circle:
 //
 //	LIBXFAT_FIXTURE_OUT=/tmp/fixture.exfat go test ./tests/ -run WriteSuperfloppyFixture
+//
+// It has been read back with dissect.fat 3.13, Fox-IT's exFAT parser, which agrees
+// with this library on the volume label, cluster size, cluster count and root
+// cluster, and on the path, attributes, DataLength, ValidDataLength, first cluster
+// and NoFatChain flag of all thirteen live entries - including unwritten.bin's
+// deliberate 3000/100 split. The one disagreement is the nameless directory, which
+// dissect reports with an empty name where this library substitutes
+// $Unnamed-17: a naming policy, not a parse difference.
+//
+// Reading the same image back is not the same as validating it. A conformance
+// checker also judges what a parser is free to ignore, and doing that found a real
+// defect here: every stream extension left GeneralSecondaryFlags bit 0,
+// AllocationPossible, clear, which this library never reads and dissect reports
+// faithfully as zero. Running one is still worth doing:
+//
 //	fsck.exfat -n /tmp/fixture.exfat
 //
-// exfatprogs 1.2.2 reports exactly one error against it:
-//
-//	ERROR: /docs: the name length of a file is wrong
-//
-// which is the deliberately nameless directory, and confirms that entry is
-// genuinely malformed rather than merely unusual. Everything else - the boot
-// region and its checksum, the backup boot region, the up-case table and its
-// checksum, the allocation bitmap, and every entry set's SetChecksum, NameHash
-// and name length - it accepts.
+// exfatprogs is expected to report the nameless directory - the entry is genuinely
+// malformed, which is why it is in the fixture - and that has not been confirmed
+// against a build of it.
 func TestWriteSuperfloppyFixture(t *testing.T) {
 	path := os.Getenv("LIBXFAT_FIXTURE_OUT")
 	if path == "" {

@@ -1,27 +1,27 @@
+// list-all prints every entry on a volume with its path and its identity.
+//
+// It is the shortest useful shape of the walk API: one callback, one line per
+// entry, no tree of its own. The library composes the paths and supplies each
+// entry's parent, so this program holds no state at all.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
-	"path"
+	"os/signal"
 	"strings"
 
 	"github.com/aoiflux/libxfat/v2"
 )
 
-type listingEntry struct {
-	typeName string
-	marks    string
-	size     uint64
-	fullPath string
-}
-
 func main() {
 	imagePath := flag.String("image", "", "Path to an exFAT image file")
 	optimistic := flag.Bool("optimistic", false, "Skip strict VBR offset verification")
 	offset := flag.Uint64("offset", 0, "Sector offset where the exFAT volume starts")
+	deleted := flag.Bool("deleted", false, "Also report deleted records and entries carved from free space")
 	flag.Parse()
 
 	if *imagePath == "" {
@@ -40,41 +40,51 @@ func main() {
 		log.Fatalf("parse exFAT: %v", err)
 	}
 
-	rootEntries, err := exfat.ReadRootDir()
-	if err != nil {
-		log.Fatalf("read root directory: %v", err)
-	}
-
-	entries, err := collectEntries(exfat, rootEntries, "/")
-	if err != nil {
-		log.Fatalf("walk filesystem: %v", err)
-	}
-	volumeLabel, err := exfat.VolumeLabel()
+	// The volume label belongs to the volume, not to any entry, so it is reported
+	// once here rather than synthesised into the listing as a fake path.
+	label, err := exfat.VolumeLabel()
 	if err != nil {
 		log.Fatalf("read volume label: %v", err)
 	}
-	entries = appendVolumeEntry(entries, volumeLabel)
+	if label == "" {
+		label = "(none)"
+	}
+	fmt.Printf("Volume %s  %d clusters of %d bytes  serial %08X\n",
+		label, exfat.ClusterCount(), exfat.ClusterSize(), exfat.VolumeSerialNumber())
 
-	for _, entry := range entries {
-		fmt.Printf("%-10s %-28s %10d %s\n", entry.typeName, entry.marks, entry.size, entry.fullPath)
+	// A whole-volume walk on a large image takes a while, so let Ctrl-C stop it.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	opts := libxfat.WalkOptions{
+		IncludeDeleted:            *deleted,
+		DescendDeletedDirectories: *deleted,
+		IncludeRecovered:          *deleted,
+	}
+
+	err = exfat.WalkWithOptions(ctx, opts,
+		func(path string, _ uint32, entry libxfat.Entry) error {
+			fmt.Printf("%-10s %-24s %10d  %-14s %s\n",
+				entryKind(entry), entryMarks(entry), entry.Size(),
+				entryIdentity(exfat, entry), path)
+			return nil
+		})
+	if err != nil {
+		log.Fatalf("walk filesystem: %v", err)
 	}
 }
 
-func entryType(entry libxfat.Entry) string {
-	if isVolumeEntry(entry) {
-		return "volume"
-	}
-	if entry.IsSpecialFile() {
-		return "special"
-	}
-	if entry.IsDir() {
+func entryKind(entry libxfat.Entry) string {
+	switch {
+	case entry.IsSpecialFile():
+		return "metadata"
+	case entry.IsVirtualEntry():
+		return "virtual"
+	case entry.IsDir():
 		return "directory"
+	default:
+		return "file"
 	}
-	return "file"
-}
-
-func isVolumeEntry(entry libxfat.Entry) bool {
-	return strings.Contains(strings.ToLower(entry.Name()), "volume")
 }
 
 func entryMarks(entry libxfat.Entry) string {
@@ -82,14 +92,11 @@ func entryMarks(entry libxfat.Entry) string {
 	if entry.IsDeleted() {
 		marks = append(marks, "deleted")
 	}
-	if entry.IsSpecialFile() {
-		marks = append(marks, "special")
+	if entry.IsContiguous() {
+		marks = append(marks, "contiguous")
 	}
-	if entry.IsVirtualEntry() {
-		marks = append(marks, "virtual")
-	}
-	if isVolumeEntry(entry) {
-		marks = append(marks, "volume")
+	if entry.Size() != entry.ValidDataSize() {
+		marks = append(marks, "partly-unwritten")
 	}
 	if len(marks) == 0 {
 		return "-"
@@ -97,58 +104,13 @@ func entryMarks(entry libxfat.Entry) string {
 	return strings.Join(marks, ",")
 }
 
-func appendVolumeEntry(entries []listingEntry, label string) []listingEntry {
-	value := label
-	if strings.TrimSpace(value) == "" {
-		value = "<no-label>"
+// entryIdentity prints the entry's FileID, or a dash for the entries that have
+// none: a synthetic entry has no directory record, and one carved out of free
+// space has no surviving parent to be identified against.
+func entryIdentity(exfat *libxfat.ExFAT, entry libxfat.Entry) string {
+	id, ok := exfat.FileID(entry)
+	if !ok {
+		return "-"
 	}
-
-	volumePath := path.Join("/", "$Volume", value)
-	entries = append(entries, listingEntry{
-		typeName: "volume",
-		marks:    "volume",
-		size:     uint64(len(value)),
-		fullPath: volumePath,
-	})
-
-	return entries
-}
-
-func collectEntries(exfat *libxfat.ExFAT, entries []libxfat.Entry, basePath string) ([]listingEntry, error) {
-	var out []listingEntry
-
-	for _, entry := range entries {
-		name := entry.Name()
-		if strings.TrimSpace(name) == "" {
-			name = "<no-name>"
-		}
-
-		fullPath := path.Join(basePath, name)
-		if fullPath == "" {
-			fullPath = "/"
-		}
-		out = append(out, listingEntry{
-			typeName: entryType(entry),
-			marks:    entryMarks(entry),
-			size:     entry.Size(),
-			fullPath: fullPath,
-		})
-
-		if !entry.IsDir() || entry.IsDeleted() || entry.IsVirtualEntry() || entry.IsSpecialFile() {
-			continue
-		}
-
-		subEntries, err := exfat.ReadDir(entry)
-		if err != nil {
-			return nil, err
-		}
-
-		childEntries, err := collectEntries(exfat, subEntries, fullPath)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, childEntries...)
-	}
-
-	return out, nil
+	return id.String()
 }

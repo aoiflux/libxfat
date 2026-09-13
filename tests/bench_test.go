@@ -231,7 +231,7 @@ func BenchmarkWalkTree(b *testing.B) {
 	}
 }
 
-func BenchmarkGetFullPathIndexableEntries(b *testing.B) {
+func BenchmarkContiguousFilePaths(b *testing.B) {
 	fs := openBenchImage(b, 1000)
 	root, err := fs.ReadRootDir()
 	if err != nil {
@@ -317,14 +317,14 @@ func openSuperfloppyBench(b *testing.B) *libxfat.ExFAT {
 	return fs
 }
 
-// BenchmarkGetClusterListChained measures the FAT-chained branch, which used to
+// BenchmarkClusterListChained measures the FAT-chained branch, which used to
 // build the contiguous cluster range and immediately throw it away.
 //
 // The fixture's fragmented.bin spans two clusters, so the bytes here understate
 // what the change is worth: the discarded slice was sized by the file, so on a
 // real volume it scales with the size of every fragmented file walked. The
 // allocation count is the part that transfers directly.
-func BenchmarkGetClusterListChained(b *testing.B) {
+func BenchmarkClusterListChained(b *testing.B) {
 	fs := openSuperfloppyBench(b)
 	root, err := fs.ReadRootDir()
 	if err != nil {
@@ -348,6 +348,48 @@ func BenchmarkGetClusterListChained(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if _, _, err := fs.ClusterList(target); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// benchFragmentTarget returns the fixture's one genuinely fragmented file.
+func benchFragmentTarget(b *testing.B, fs *libxfat.ExFAT) libxfat.Entry {
+	b.Helper()
+
+	root, err := fs.ReadRootDir()
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, entry := range root {
+		if entry.Name() == "fragmented.bin" {
+			return entry
+		}
+	}
+	b.Fatal("fragmented.bin not found in fixture root")
+	return libxfat.Entry{}
+}
+
+// BenchmarkFragmentOffsetsFragmented is the cost of mapping one fragmented file
+// without reading any of it.
+//
+// It is the operation a whole-volume change-detection pass repeats once per file,
+// so its allocation count is the number that matters: the fixture's fragmented.bin
+// spans two clusters, which understates the wall-clock saving but not the shape of
+// the work. Nothing here scales with file size - only with the number of runs.
+func BenchmarkFragmentOffsetsFragmented(b *testing.B) {
+	fs := openSuperfloppyBench(b)
+	target := benchFragmentTarget(b, fs)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		result, err := fs.FragmentOffsetsWithOptions(target, libxfat.FragmentOptions{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(result.Ranges) != 2 {
+			b.Fatalf("got %d ranges, want the 2 runs of a fragmented file", len(result.Ranges))
 		}
 	}
 }

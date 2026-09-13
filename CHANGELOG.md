@@ -106,6 +106,10 @@ writing it to disk. Most of the rest follows from removing what stood in the way
   entry-formatting helpers are gone; presentation belongs to the caller, and the
   `examples/` programs do their own. `ExtractAllFiles` no longer prints `Done!`.
 
+- `examples/list-all` is rebuilt on `WalkWithOptions` and reports each entry's
+  `FileID`, replacing its own recursion and path composition. Its `-deleted` flag
+  is the shortest demonstration of the deleted and recovered walk options.
+
 - `ExtractAllFiles(rootEntries []Entry, dstdir string)` is now
   `ExtractAllFiles(ctx context.Context, dstdir string)`. It walks the tree itself,
   streams each file from its located extents, and reports the first damaged file

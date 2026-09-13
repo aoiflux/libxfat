@@ -67,7 +67,13 @@ func (e *ExFAT) MediaFailure() bool {
 
 // PercentInUse is the PercentInUse field, a rounded hint the formatter or the last
 // writer recorded. It is not computed from the allocation bitmap and need not agree
-// with it; AllocatedClusters and ClusterCount are the counted answer.
+// with it; AllocatedClusters and ClusterCount are the counted answer. Volumes that
+// disagree wildly are common: a hint of 0 on a three-quarters-full volume says only
+// that nothing has updated the field.
+//
+// The specification reserves 0xFF for "not available", so treat 255 as absent
+// rather than as a percentage. The recorded byte is returned as it stands either
+// way, because which value the volume holds is itself evidence.
 func (e *ExFAT) PercentInUse() byte {
 	return e.vbr.percentInUse
 }

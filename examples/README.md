@@ -22,12 +22,18 @@ The `extract-all` example also requires:
 
 - `-out`: output directory where recovered files will be written.
 
+The `list-all` example also accepts:
+
+- `-deleted`: report deleted and recovered entries alongside the live tree.
+
 ## Included Programs
 
 - `list-root`: open an image and print root directory entries, including
   metadata and virtual entries.
-- `list-all`: walk the full filesystem and print reachable files and directories
-  with full paths.
+- `list-all`: walk the volume with `WalkWithOptions` and print one line per
+  entry - kind, marks, size, `FileID` and full path. Pass `-deleted` to include
+  deleted records, descend deleted directories, and report entry sets carved out
+  of free space.
 - `volume-stats`: parse the root directory and report volume label, cluster
   size, used space, allocation counts, and metadata entry totals.
 - `extract-all`: extract all regular files reachable from the root directory
