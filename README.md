@@ -16,6 +16,10 @@ The library is read-oriented. It does not create or modify exFAT volumes.
   provenance of every range reported rather than assumed.
 - Read file content in memory through `io.ReaderAt`, `io.Reader` or
   `io.SectionReader`, clamped to the bytes actually located.
+- Emit a JSON report of a whole volume: geometry, every entry with its identity,
+  its extents, and the provenance of those extents.
+- Say what the format itself can record, so a consumer can tell "exFAT keeps no
+  such field" from "the field was empty here".
 - Safe for concurrent use: one open volume, many goroutines.
 - Extract regular files while preserving directory structure, plus the
   filesystem's own metadata streams and regions.
@@ -399,7 +403,7 @@ says so rather than padding.
 changed-range list can be intersected against a file's extents without reading
 any file data. `FragmentResult` carries the provenance: `ChainWalked`,
 `NoFatChain`, `Assumed`, `Truncated`, `ChainBroken`, `LoopDetected`,
-`FirstClusterReallocated`, `ValidBytes`.
+`FirstClusterReallocated`, `AllocationContradiction`, `ValidBytes`.
 
 ### Identify Entries
 
@@ -411,6 +415,43 @@ any file data. `FragmentResult` carries the provenance: `ChainWalked`,
 directory being relocated, and explicitly best-effort. Read its documentation
 before using it for rename detection — a reused slot carries its predecessor's
 identity exactly, and no field on an exFAT volume distinguishes the two.
+
+### Report A Volume
+
+- `Report(name string) (*ExFATReport, error)`
+- `ReportDeep(name string) (*ExFATReport, error)`
+- `ReportWithOptions(name string, opts ReportOptions) (*ExFATReport, error)`
+- `ReportWithOptionsContext(ctx context.Context, name string, opts ReportOptions) (*ExFATReport, error)`
+- `WriteReport`, `WriteReportDeep`, `WriteReportWithOptions`,
+  `WriteReportWithOptionsContext` — the same four, encoded as indented JSON
+- `(*ExFATReport).Summary()`, `FilterFiles`, `FilesByType`, `DeletedFiles`,
+  `RecoveredFiles`, `FragmentedFiles`, `AssumedFiles`
+
+A report is one document: an `ExFATMeta` block describing the volume, and one
+`ExFATFile` row per entry carrying its identity, its extents and how those extents
+were derived. It is the form for a consumer that does not link against this
+library, and it follows the same two rules the API does — an identity scalar is
+never omitted when zero, and a provenance flag is never omitted when false,
+because a missing key and a recorded `false` mean entirely different things to
+whoever reads the document later.
+
+`ReportDeep` searches more places; it never weakens the evidence. In particular it
+does not set `Fragments.AssumeContiguous`, so no row in it carries a hypothesised
+extent unless the caller asked for one through `ReportWithOptions`.
+
+### Capabilities
+
+- `Capabilities() Capabilities`
+
+What the format records, as opposed to what this volume happens to hold. The
+answers that matter are the negative ones: exFAT has no metadata-change time, no
+POSIX ownership, no extended attributes, and — the consequential one — no reusable
+file identity, so `StableFileIdentity` and `IdentityReuseCounter` are both false
+and a `FileID` is an address rather than an identity. `SecondFAT` is the one field
+read from the volume in hand rather than fixed by the format.
+
+The same block is embedded in every report, so a document read back later still
+says what its filesystem could and could not record.
 
 ### Extract Data
 
@@ -448,6 +489,7 @@ for them; locate those with `entry.RegionOffset()` plus `entry.Size()`, or with
 
 - `VolumeSerialNumber() uint32`, `FilesystemRevision() (major, minor byte)`
 - `VolumeFlags() uint16`, `ActiveFAT() int`, `VolumeDirty() bool`, `MediaFailure() bool`
+- `ActiveFatOffset() int64` — the FAT chain walks actually read
 - `Base() int64`, `PartitionOffset() uint64`, `VolumeSize() uint64`
 - `BytesPerSector() uint32`, `SectorsPerCluster() uint32`, `ClusterCount() uint32`
 - `RootDirCluster() uint32`, `ClusterHeapOffset() int64`
@@ -457,9 +499,17 @@ for them; locate those with `entry.RegionOffset()` plus `entry.Size()`, or with
 was not cleanly unmounted, and so that its bitmap, directory records and FAT need
 not agree with each other.
 
+`ActiveFAT` and `ActiveFatOffset` differ from `FatOffset` only on a TexFAT volume,
+which is the only kind with two FATs. Chain walks read the table the volume's
+`ActiveFAT` flag names; where a volume records one FAT and an active index of 1 -
+which is malformed - the recorded index is still reported while the walk keeps
+reading the only FAT that exists.
+
 ### Entry Helpers
 
-Each parsed directory item is represented by `Entry`. Common helpers include:
+Each parsed directory item is represented by `Entry`. `Name()` is the name as
+recorded on the volume, with nothing appended - not even for a deleted entry, whose
+record is reported through `IsDeleted()` instead. Common helpers include:
 
 - `Name()`
 - `Size()`
@@ -475,6 +525,9 @@ Each parsed directory item is represented by `Entry`. Common helpers include:
 - `IsRegion()` and `IsMetadataStream()`
 - `RegionOffset() (uint64, bool)`
 - `IsContiguous()` — the volume recorded `NoFatChain` for this stream
+- `AllocationPossible()` — the record says its first cluster and size mean something
+- `SecondaryFlags() byte` — the raw `GeneralSecondaryFlags`, including bits this
+  library does not interpret
 - `IsContiguousFile()` — the filter `ContiguousFiles` applies
 - `NameChecksumVerified()` and `NameChecksumMismatch()`
 - `NameChecksumError() error`
@@ -563,6 +616,7 @@ go run ./examples/list-root -image /path/to/volume.exfat
 go run ./examples/list-all -image /path/to/volume.exfat
 go run ./examples/volume-stats -image /path/to/volume.exfat
 go run ./examples/extract-all -image /path/to/volume.exfat -out ./recovered
+go run ./examples/report -image /path/to/volume.exfat -summary
 ```
 
 Common flags:
@@ -574,9 +628,10 @@ Common flags:
 The example programs cover:
 
 - Listing root directory entries, including metadata and virtual entries.
-- Walking the full filesystem and printing full paths for indexable entries.
+- Walking the whole tree and printing each entry's kind, marks, identity and path.
 - Reporting volume and allocation statistics.
 - Extracting all regular files into an output directory.
+- Writing the JSON report, or its aggregate counters with `-summary`.
 
 ## Testing
 
@@ -639,15 +694,18 @@ sector size, and whether a UTC offset is recorded at all.
 
 ## Notes On Robustness
 
-Recent parser improvements in this repository include:
+Parser hardening in this repository includes:
 
 - Better bounds checking when reading cluster-backed records.
 - Safer UTF-16 filename decoding.
 - Directory-set checksum validation.
 - Validation helpers for key exFAT directory record types.
 - More reliable handling of short bitmaps, FAT loops, and truncated images.
-
-See `IMPROVEMENTS.md` for a more detailed implementation summary.
+- Reporting a record that contradicts itself - one naming a first cluster while
+  its own flags say no allocation is possible - rather than reading it as though
+  it agreed with itself.
+- Reading the FAT the volume's `ActiveFAT` flag names, and ignoring that flag when
+  it selects a second FAT the volume does not have.
 
 ## Repository Layout
 
@@ -663,6 +721,8 @@ See `IMPROVEMENTS.md` for a more detailed implementation summary.
 |-- file.go           # OpenEntry and *File
 |-- extent_reader.go  # io.ReaderAt and io.Reader over a file's ranges
 |-- identity.go       # FileID, and an entry's own address
+|-- report.go         # the JSON report: ExFATReport and its rows
+|-- capabilities.go   # what the format can record, as opposed to what it holds
 |-- volume.go         # the volume's identity and geometry
 |-- vbr.go            # VBR parsing
 |-- cluster.go        # cluster traversal and content reads

@@ -44,7 +44,7 @@ func TestGetChainedClusterListDetectsLoop(t *testing.T) {
 
 func TestGetClusterListZeroLength(t *testing.T) {
 	vbr := VBR{clusterSize: 512}
-	entry := Entry{dataLen: 0, noFatChain: true}
+	entry := Entry{dataLen: 0, secondaryFlags: ALLOCATION_POSSIBLE_FLAG | NOT_FAT_CHAIN_FLAG}
 
 	clusters, tail, err := vbr.getClusterList(entry)
 	if err != nil {

@@ -363,3 +363,103 @@ func TestFatWindowRejectsClusterWithNoFatEntry(t *testing.T) {
 		t.Fatal("fatWindow.next() on a cluster with no FAT entry returned no error")
 	}
 }
+
+// newTwoFatVBR builds a TexFAT-shaped volume: two FATs, laid out one after the
+// other, holding different chains for the same starting cluster. active selects
+// which one the VolumeFlags name.
+//
+// The two tables disagreeing is the only way to tell which one was read, which is
+// why the fixture is built this way rather than by writing one table twice.
+func newTwoFatVBR(t *testing.T, active int, first, second map[uint32]uint32) VBR {
+	t.Helper()
+
+	const fatBytes = tcFatSectors * tcSectorSize
+	secondFatOffset := tcFatOffset + fatBytes
+	heapOffset := secondFatOffset + fatBytes
+
+	image := make([]byte, heapOffset+tcClusters*tcClusterSize)
+	write := func(base int, links map[uint32]uint32) {
+		for cluster, next := range links {
+			off := base + int(cluster)*4
+			binary.LittleEndian.PutUint32(image[off:off+4], next)
+		}
+	}
+	write(tcFatOffset, first)
+	write(secondFatOffset, second)
+
+	var flags uint16
+	if active == 1 {
+		flags = VOLUME_FLAG_ACTIVE_FAT
+	}
+
+	return VBR{
+		dimage:        &countingReaderAt{data: image, heapStart: int64(heapOffset)},
+		size:          int64(len(image)),
+		fatSize:       tcFatSectors,
+		sectorSize:    tcSectorSize,
+		clusterSize:   tcClusterSize,
+		nbClusters:    tcClusters,
+		numberOfFats:  2,
+		volumeFlags:   flags,
+		firstFat:      tcFatOffset,
+		dataAreaStart: uint64(heapOffset),
+	}
+}
+
+// TestActiveFatSelectsTheTableWalked is the regression test for a gap that was
+// documented rather than fixed: ActiveFAT reported which table the volume said was
+// live, while every chain walk read the first one regardless. On a TexFAT volume
+// whose flag selects the second FAT, that meant every chain libxfat reported came
+// from the copy the volume had superseded.
+func TestActiveFatSelectsTheTableWalked(t *testing.T) {
+	// The same starting cluster leads somewhere different in each table.
+	firstFat := map[uint32]uint32{2: 3, 3: EXFAT_EOF_START}
+	secondFat := map[uint32]uint32{2: 5, 5: 6, 6: EXFAT_EOF_START}
+
+	for _, tc := range []struct {
+		name   string
+		active int
+		want   []uint32
+	}{
+		{name: "active FAT 0 walks the first table", active: 0, want: []uint32{2, 3}},
+		{name: "active FAT 1 walks the second table", active: 1, want: []uint32{2, 5, 6}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vbr := newTwoFatVBR(t, tc.active, firstFat, secondFat)
+
+			chain, err := vbr.getChainedClusterList(2, uint64(len(tc.want)))
+			if err != nil {
+				t.Fatalf("getChainedClusterList() error = %v", err)
+			}
+			if len(chain) != len(tc.want) {
+				t.Fatalf("chain = %v, want %v", chain, tc.want)
+			}
+			for i, want := range tc.want {
+				if chain[i] != want {
+					t.Fatalf("chain = %v, want %v", chain, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestActiveFatIgnoredWithoutASecondTable pins the guard. A volume recording one
+// FAT and an active index of 1 is malformed, and honouring the flag there would
+// point every walk just past the FAT region - at the cluster heap, read as though
+// it were a table of cluster numbers.
+func TestActiveFatIgnoredWithoutASecondTable(t *testing.T) {
+	vbr, _ := newCountingVBR(t, map[uint32]uint32{2: 3, 3: EXFAT_EOF_START})
+	vbr.numberOfFats = 1
+	vbr.volumeFlags = VOLUME_FLAG_ACTIVE_FAT
+
+	if got, want := vbr.fatStart(), vbr.firstFat; got != want {
+		t.Fatalf("fatStart() = %d, want %d: the only FAT there is", got, want)
+	}
+	chain, err := vbr.getChainedClusterList(2, 2)
+	if err != nil {
+		t.Fatalf("getChainedClusterList() error = %v", err)
+	}
+	if len(chain) != 2 || chain[0] != 2 || chain[1] != 3 {
+		t.Fatalf("chain = %v, want [2 3]", chain)
+	}
+}

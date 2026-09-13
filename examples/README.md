@@ -10,6 +10,7 @@ go run ./examples/list-root -image /path/to/volume.exfat
 go run ./examples/list-all -image /path/to/volume.exfat
 go run ./examples/volume-stats -image /path/to/volume.exfat
 go run ./examples/extract-all -image /path/to/volume.exfat -out ./recovered
+go run ./examples/report -image /path/to/volume.exfat -summary
 ```
 
 Common flags:
@@ -26,6 +27,13 @@ The `list-all` example also accepts:
 
 - `-deleted`: report deleted and recovered entries alongside the live tree.
 
+The `report` example also accepts:
+
+- `-deep`: also report deleted records, entries carved from free space, cluster
+  slack and never-written tails.
+- `-summary`: print the aggregate counters instead of the JSON document.
+- `-out`: write the document to a file instead of stdout.
+
 ## Included Programs
 
 - `list-root`: open an image and print root directory entries, including
@@ -38,3 +46,8 @@ The `list-all` example also accepts:
   size, used space, allocation counts, and metadata entry totals.
 - `extract-all`: extract all regular files reachable from the root directory
   into an output directory while preserving directory structure.
+- `report`: write the volume's JSON report - geometry, what the format can
+  record, and one row per entry with its identity, its extents and how those
+  extents were derived. `-summary` prints the counters instead, including the
+  recorded fullness hint beside the count from the allocation bitmap, which on a
+  real volume routinely disagree.

@@ -68,7 +68,22 @@ const (
 	EXFAT_DIRRECORD_FILENAME_EXT     = 0xC1
 	EXFAT_DIRRECORD_DEL_FILENAME_EXT = 0x41
 
-	NOT_FAT_CHAIN_FLAG = 0x02
+	// Bits of GeneralSecondaryFlags, the byte at offset 1 of a stream extension
+	// entry. Section 7.4.1 of the specification.
+	//
+	// ALLOCATION_POSSIBLE_FLAG says that FirstCluster and DataLength mean
+	// something. With it clear the specification defines both as undefined, so a
+	// record naming a first cluster while leaving this bit clear contradicts
+	// itself; see Entry.AllocationPossible and
+	// FragmentResult.AllocationContradiction. Every formatter sets it on a
+	// stream that has an allocation, which is why the contradiction is a finding
+	// rather than a routine case.
+	//
+	// NOT_FAT_CHAIN_FLAG says the stream occupies consecutive clusters and its
+	// FAT entries are undefined. Real formatters therefore write 0x01 for a
+	// chained stream and 0x03 for a contiguous one.
+	ALLOCATION_POSSIBLE_FLAG = 0x01
+	NOT_FAT_CHAIN_FLAG       = 0x02
 )
 
 const (
@@ -113,7 +128,6 @@ const (
 )
 
 const ZERO_ENTRY_CLUSTER = 0x0
-const DELETED = " (deleted)"
 
 // Sentinel error for EOF - used when reading content may legitimately hit EOF
 // Use errors.Is(err, ErrEOF) or errors.Is(err, io.EOF) to check

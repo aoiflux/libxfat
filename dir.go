@@ -494,33 +494,33 @@ func (e *ExFAT) readRootDirEntries() ([]Entry, error) {
 func (e *ExFAT) createVirtualEntries() []Entry {
 	var virtualEntries []Entry
 
-	fatBytes := uint64(e.vbr.fatSize) * uint64(e.vbr.sectorSize)
+	fatBytes := e.vbr.fatBytes()
 
 	// $MBR virtual entry - represents the Master Boot Record / VBR.
 	// The boot region is 12 sectors of the volume's own sector size, which is
 	// not necessarily 512.
 	mbrEntry := Entry{
-		etype:        0xFF, // Virtual entry type
-		name:         MBR,
-		dataLen:      uint64(VBR_SIZE) * uint64(e.vbr.sectorSize),
-		entryAttr:    ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
-		noFatChain:   true,
-		isRegion:     true,
-		regionOffset: uint64(e.vbr.base),
+		etype:          0xFF, // Virtual entry type
+		name:           MBR,
+		dataLen:        uint64(VBR_SIZE) * uint64(e.vbr.sectorSize),
+		entryAttr:      ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
+		secondaryFlags: ALLOCATION_POSSIBLE_FLAG | NOT_FAT_CHAIN_FLAG,
+		isRegion:       true,
+		regionOffset:   uint64(e.vbr.base),
 	}
 	mbrEntry.validDataLen = mbrEntry.dataLen
 	virtualEntries = append(virtualEntries, mbrEntry)
 
 	// $FAT1 virtual entry - represents the first FAT
 	fat1Entry := Entry{
-		etype:        0xFF, // Virtual entry type
-		name:         FAT1,
-		dataLen:      fatBytes,
-		validDataLen: fatBytes,
-		entryAttr:    ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
-		noFatChain:   true,
-		isRegion:     true,
-		regionOffset: e.vbr.firstFat,
+		etype:          0xFF, // Virtual entry type
+		name:           FAT1,
+		dataLen:        fatBytes,
+		validDataLen:   fatBytes,
+		entryAttr:      ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
+		secondaryFlags: ALLOCATION_POSSIBLE_FLAG | NOT_FAT_CHAIN_FLAG,
+		isRegion:       true,
+		regionOffset:   e.vbr.firstFat,
 	}
 	virtualEntries = append(virtualEntries, fat1Entry)
 
@@ -528,25 +528,25 @@ func (e *ExFAT) createVirtualEntries() []Entry {
 	// two tables is itself an evidentiary signal.
 	if e.vbr.numberOfFats == 2 {
 		fat2Entry := Entry{
-			etype:        0xFF, // Virtual entry type
-			name:         FAT2,
-			dataLen:      fatBytes,
-			validDataLen: fatBytes,
-			entryAttr:    ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
-			noFatChain:   true,
-			isRegion:     true,
-			regionOffset: e.vbr.firstFat + fatBytes,
+			etype:          0xFF, // Virtual entry type
+			name:           FAT2,
+			dataLen:        fatBytes,
+			validDataLen:   fatBytes,
+			entryAttr:      ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
+			secondaryFlags: ALLOCATION_POSSIBLE_FLAG | NOT_FAT_CHAIN_FLAG,
+			isRegion:       true,
+			regionOffset:   e.vbr.firstFat + fatBytes,
 		}
 		virtualEntries = append(virtualEntries, fat2Entry)
 	}
 
 	// $OrphanFiles virtual directory - represents orphaned/unlinked files
 	orphanEntry := Entry{
-		etype:      0xFF, // Virtual entry type
-		name:       ORPHANFILES,
-		dataLen:    0,
-		entryAttr:  ENTRY_ATTR_DIR_MASK | ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
-		noFatChain: true,
+		etype:          0xFF, // Virtual entry type
+		name:           ORPHANFILES,
+		dataLen:        0,
+		entryAttr:      ENTRY_ATTR_DIR_MASK | ENTRY_ATTR_SYSTEM_MASK | ENTRY_ATTR_HIDDEN_MASK,
+		secondaryFlags: ALLOCATION_POSSIBLE_FLAG | NOT_FAT_CHAIN_FLAG,
 	}
 	virtualEntries = append(virtualEntries, orphanEntry)
 

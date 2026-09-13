@@ -80,6 +80,32 @@ func (v *VBR) parseVBRData(vbr []byte, src Source) error {
 	return nil
 }
 
+// fatBytes is the size of one FAT in bytes.
+func (v *VBR) fatBytes() uint64 {
+	return uint64(v.fatSize) * uint64(v.sectorSize)
+}
+
+// fatStart is the absolute offset of the FAT a chain walk reads.
+//
+// It is the first FAT on every ordinary volume. On a TexFAT volume - the only
+// kind that has two - the VolumeFlags ActiveFAT bit says which of the pair is
+// live, and following the stale one would report chains the volume has already
+// superseded.
+//
+// The flag is honoured only where a second FAT exists to select. A volume
+// recording one FAT and an ActiveFAT of 1 is malformed, and believing it would
+// point every chain walk just past the FAT region, at whatever lies there, read
+// as though it were a FAT.
+//
+// This is derived rather than stored so that it cannot fall out of step with the
+// fields it comes from.
+func (v *VBR) fatStart() uint64 {
+	if v.numberOfFats > 1 && v.volumeFlags&VOLUME_FLAG_ACTIVE_FAT != 0 {
+		return v.firstFat + v.fatBytes()
+	}
+	return v.firstFat
+}
+
 // checkPartitionOffset reconciles the PartitionOffset recorded in the volume
 // boot record with where the caller actually opened the volume.
 //

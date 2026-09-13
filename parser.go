@@ -220,10 +220,6 @@ func (p *dirParser) finishEntrySet(entries *[]Entry) {
 	p.entry.expectedSetChecksum = p.expectedChecksum
 	p.entry.computedSetChecksum = p.setChecksum
 
-	if p.entry.IsDeleted() {
-		p.entry.name += DELETED
-	}
-
 	drop := checked && !verified && p.rejectChecksumMismatch
 	if !drop {
 		*entries = append(*entries, p.entry)
@@ -456,7 +452,12 @@ func (p *dirParser) populateRecordBitmapUpcase(rec dirRecordView) {
 	p.virtualEntry.accessedUtcOffset = 0
 	p.virtualEntry.entryAttr = 0
 	p.virtualEntry.secondaryCount = 0
-	p.virtualEntry.noFatChain = false
+	// The $BitMap and $UpCase records have no GeneralSecondaryFlags field at all -
+	// their allocation is stated by the FirstCluster and DataLength in the record
+	// itself, and they are ordinary cluster chains. So the flags here are the
+	// library's statement about the stream rather than a quotation from it:
+	// allocation possible, no contiguity claimed.
+	p.virtualEntry.secondaryFlags = ALLOCATION_POSSIBLE_FLAG
 	p.virtualEntry.isRegion = false
 	p.virtualEntry.regionOffset = 0
 	p.virtualEntry.validDataLen = dataLen
@@ -504,10 +505,11 @@ func (p *dirParser) populateDirRecordStreamSeen(rec dirRecordView) {
 	// allocated-but-never-written tail that slack analysis depends on.
 	p.entry.validDataLen = rec.le64(8)
 
-	p.entry.noFatChain = false
-	if (rec.byteAt(1) & NOT_FAT_CHAIN_FLAG) != 0 {
-		p.entry.noFatChain = true
-	}
+	// Kept whole rather than decomposed into booleans: the two bits this library
+	// interprets are reachable through Entry.IsContiguous and
+	// Entry.AllocationPossible, and a bit it does not interpret survives into a
+	// report instead of being dropped here.
+	p.entry.secondaryFlags = rec.byteAt(1)
 
 	p.remainingSC--
 }

@@ -26,10 +26,10 @@ func TestGetClusterListReportsTheBadCluster(t *testing.T) {
 	for name, cluster := range cases {
 		t.Run(name, func(t *testing.T) {
 			entry := Entry{
-				etype:        EXFAT_DIRRECORD_FILEDIR,
-				dataLen:      6144, // twelve clusters
-				entryCluster: cluster,
-				noFatChain:   true,
+				etype:          EXFAT_DIRRECORD_FILEDIR,
+				dataLen:        6144, // twelve clusters
+				entryCluster:   cluster,
+				secondaryFlags: ALLOCATION_POSSIBLE_FLAG | NOT_FAT_CHAIN_FLAG,
 			}
 
 			_, _, err := vbr.getClusterList(entry)
@@ -54,11 +54,11 @@ func TestGetClusterListReportsTheBadCluster(t *testing.T) {
 func TestGetClusterListRejectsRegionEntries(t *testing.T) {
 	vbr := VBR{clusterSize: 512, nbClusters: 4}
 	entry := Entry{
-		name:         FAT1,
-		dataLen:      512,
-		isRegion:     true,
-		regionOffset: 6144,
-		noFatChain:   true,
+		name:           FAT1,
+		dataLen:        512,
+		isRegion:       true,
+		regionOffset:   6144,
+		secondaryFlags: ALLOCATION_POSSIBLE_FLAG | NOT_FAT_CHAIN_FLAG,
 	}
 
 	clusters, tail, err := vbr.getClusterList(entry)

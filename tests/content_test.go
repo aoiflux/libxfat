@@ -184,7 +184,7 @@ func TestSectionReaderRefusesFragmented(t *testing.T) {
 // is gone, so reading it as though it were intact is not on offer.
 func TestOpenEntryRefusesDeleted(t *testing.T) {
 	fs := openSuperfloppy(t, true)
-	entry := entryNamed(t, fs, "erased.txt (deleted)")
+	entry := entryNamed(t, fs, "erased.txt")
 
 	if !entry.IsDeleted() {
 		t.Fatal("fixture entry is not reported as deleted")
@@ -225,7 +225,7 @@ func TestOpenEntryOnZeroLengthEntry(t *testing.T) {
 // why libfat has to offer contiguity as an option there.
 func TestDeletedNoFatChainIsNotAGuess(t *testing.T) {
 	fs := openSuperfloppy(t, true)
-	entry := entryNamed(t, fs, "erased.txt (deleted)")
+	entry := entryNamed(t, fs, "erased.txt")
 
 	if !entry.IsContiguous() {
 		t.Skip("fixture deleted entry does not record NoFatChain")

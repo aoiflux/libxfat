@@ -42,7 +42,7 @@ func TestParseDirDetectsDeletedDirectoryEntrySet(t *testing.T) {
 	if !entry.IsDir() {
 		t.Fatal("entry should be detected as directory")
 	}
-	if got, want := entry.Name(), "AB"+DELETED; got != want {
+	if got, want := entry.Name(), "AB"; got != want {
 		t.Fatalf("entry name = %q, want %q", got, want)
 	}
 }
@@ -147,11 +147,11 @@ func TestRecoverDeletedEntriesFromUnallocatedClusters(t *testing.T) {
 			nbClusters:    nbClusters,
 			dataAreaStart: 0,
 			bitmapEntry: Entry{
-				etype:        EXFAT_DIRRECORD_BITMAP,
-				name:         BITMAP,
-				entryCluster: 2,
-				dataLen:      1,
-				noFatChain:   true,
+				etype:          EXFAT_DIRRECORD_BITMAP,
+				name:           BITMAP,
+				entryCluster:   2,
+				dataLen:        1,
+				secondaryFlags: ALLOCATION_POSSIBLE_FLAG | NOT_FAT_CHAIN_FLAG,
 			},
 		},
 	}
@@ -166,7 +166,7 @@ func TestRecoverDeletedEntriesFromUnallocatedClusters(t *testing.T) {
 
 	found := false
 	for _, entry := range deleted {
-		if entry.Name() == "D1"+DELETED {
+		if entry.Name() == "D1" {
 			found = true
 			if !entry.IsDir() {
 				t.Fatal("recovered entry D1 should be a directory")
@@ -175,6 +175,6 @@ func TestRecoverDeletedEntriesFromUnallocatedClusters(t *testing.T) {
 	}
 
 	if !found {
-		t.Fatal("expected recovered deleted directory D1 (deleted)")
+		t.Fatal("expected recovered deleted directory D1")
 	}
 }

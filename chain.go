@@ -52,7 +52,7 @@ func (w *fatWindow) next(v *VBR, cluster uint32) (uint32, error) {
 		return 0, fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)
 	}
 
-	fatBytes := uint64(v.fatSize) * uint64(v.sectorSize)
+	fatBytes := v.fatBytes()
 	if uint64(cluster) >= fatBytes/4 {
 		return 0, fmt.Errorf("cluster out of fat: %d", cluster)
 	}
@@ -105,7 +105,7 @@ func (w *fatWindow) load(v *VBR, entryOff, fatBytes uint64) error {
 		w.buf = make([]byte, fatWindowBytes)
 	}
 
-	off, err := safeInt64(v.firstFat + rel)
+	off, err := safeInt64(v.fatStart() + rel)
 	if err != nil {
 		return err
 	}

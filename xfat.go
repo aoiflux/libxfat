@@ -66,7 +66,19 @@
 // Entry.EntrySetOffset gives the physical address of the entry's own records.
 // Read FileID's documentation before matching on it: a slot reused after a
 // deletion carries its predecessor's identity exactly, and nothing on the volume
-// distinguishes the two.
+// distinguishes the two. Capabilities states that limitation as a value a
+// consumer can branch on, along with the rest of what exFAT does and does not
+// record.
+//
+// # Reporting
+//
+// Report and its variants produce one document describing the volume and every
+// entry a walk of it found: identity, extents, and how those extents were
+// derived. WriteReport encodes it as JSON for a consumer that does not link
+// against this library. Nothing in a report is a summary of evidence the API
+// would give differently - the rows are built from the same calls - and every
+// provenance flag is present in the document even when false, because a missing
+// key and a recorded false do not mean the same thing to whoever reads it later.
 //
 // # Strict mode
 //

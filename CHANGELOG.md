@@ -46,7 +46,63 @@ writing it to disk. Most of the rest follows from removing what stood in the way
 - `VolumeSerialNumber` was parsed as a four-byte slice into the boot-region parse
   buffer, keeping all twelve sectors of it alive to hold a number nothing read.
 
+- **Chain walks read the FAT the volume says is live.** `ActiveFAT` reported which
+  of a TexFAT volume's two tables the `VolumeFlags` select, while every chain walk
+  read the first table regardless - a gap the accessor's own documentation admitted
+  to rather than closed. On such a volume every chain libxfat reported came from the
+  copy the volume had superseded. The flag is honoured only where a second FAT
+  exists to select: a volume recording one FAT and an active index of 1 is
+  malformed, and believing it would point every walk just past the FAT region, at
+  the cluster heap, read as though it were a table of cluster numbers.
+  `ActiveFatOffset` is the address that follows, and `ActiveFAT` still reports the
+  index the volume recorded even where it cannot be acted on.
+
 ### Added
+
+- **A JSON report.** `Report`, `ReportDeep`, `ReportWithOptions`,
+  `ReportWithOptionsContext` and the four `WriteReport` forms, producing an
+  `ExFATReport`: an `ExFATMeta` block for the volume and one `ExFATFile` row per
+  entry, each carrying its identity, its extents as `FileFragment`s, and a
+  `FragmentProvenance` saying how those extents were derived. `Summary`,
+  `FilterFiles`, `FilesByType`, `DeletedFiles`, `RecoveredFiles`,
+  `FragmentedFiles` and `AssumedFiles` read a report back. libxfat had no report
+  type at all, so a consumer that does not link against the library had no way to
+  receive any of this.
+
+  Two encoding rules, both deliberately verbose. An identity scalar is never
+  omitted when zero, because slot 0 is the first slot of every directory and an
+  `entry_absolute_offset` of -1 is a positive statement that the record could not
+  be located. A provenance flag is never omitted when false, because a missing
+  `chain_walked` would leave a reader unable to tell "these extents did not come
+  from a FAT walk" from "this version does not emit that field", and a hypothesis
+  would become indistinguishable from a fact.
+
+  `ReportDeep` searches more places and never weakens the evidence: it does not set
+  `AssumeContiguous`, so no row carries a synthesised extent unless the caller asked
+  for one. The meta block reports the recorded `PercentInUse` hint beside the count
+  from the allocation bitmap, and `BitmapError` when the bitmap could not be read at
+  all, so a zero count cannot be mistaken for an empty volume.
+
+- **`Capabilities`.** What exFAT records, as opposed to what a volume happens to
+  hold, as a value rather than as documentation. The negative answers are the
+  point: no metadata-change time, no POSIX ownership, no extended attributes, no
+  sparse allocation, and - the consequential one - no reusable file identity, so
+  `StableFileIdentity` and `IdentityReuseCounter` are both false and a `FileID` is
+  an address rather than an identity. Without this a consumer cannot distinguish
+  "this format does not keep that" from "that was absent here", and reports a
+  change that never happened. `SecondFAT` is the one field read from the volume in
+  hand. The block is embedded in every report, so a stored document still says what
+  its filesystem could record.
+
+- **`Entry.AllocationPossible` and `Entry.SecondaryFlags`, and
+  `FragmentResult.AllocationContradiction`.** Bit 0 of `GeneralSecondaryFlags` says
+  whether a stream extension's `FirstCluster` and `DataLength` mean anything at all;
+  the parser tested only bit 1, so a record naming a first cluster while declaring
+  no allocation possible was read as though it agreed with itself. The extents are
+  still located - a cluster number written into a record is a lead whether or not
+  the flag beside it agrees - and the contradiction is now reported alongside them.
+  `SecondaryFlags` quotes the byte whole, so a bit this library does not interpret
+  still reaches a report, for the same reason `VolumeFlags` exists.
 
 - **Extent mapping.** `Range`, `FragmentResult`, `FragmentOptions`,
   `FragmentOffsets`, `FragmentOffsetsWithOptions`, `IsFragmented`, `SlackRange`,
@@ -106,6 +162,29 @@ writing it to disk. Most of the rest follows from removing what stood in the way
   entry-formatting helpers are gone; presentation belongs to the caller, and the
   `examples/` programs do their own. `ExtractAllFiles` no longer prints `Done!`.
 
+- **`Entry.Name` no longer appends `" (deleted)"`.** The decoration made a name
+  that could not be compared against the same file seen live, against another
+  tool's output, or against an earlier reading of the same volume - and it landed
+  in every path `Walk` composed. The library was already stripping the suffix back
+  off internally to answer `HasNoName`, which is the tell: this was presentation
+  living inside the parser, the same thing removing stdout addressed. `IsDeleted`
+  is the flag to branch on, and a caller that wants the old rendering appends the
+  string itself. The `DELETED` constant is gone with the behaviour.
+
+- `examples/report` is a new example: the JSON document, or its counters with
+  `-summary`, which prints the recorded fullness hint beside the count from the
+  bitmap.
+
+- `examples/list-all` classifies entries in the same five kinds a report row uses -
+  region, virtual, metadata, directory, file - and marks a record whose
+  `AllocationPossible` bit is clear. Its kind test previously matched special files
+  before virtual ones, so `$MBR` and `$FAT1` were reported as metadata and the
+  "virtual" label was unreachable.
+
+- `Timestamps` carries JSON tags, so it can be embedded in a report row. A
+  timestamp the volume does not record is omitted rather than written as a zero
+  time; the offset-validity flags are always present, because they are provenance.
+
 - `examples/list-all` is rebuilt on `WalkWithOptions` and reports each entry's
   `FileID`, replacing its own recursion and path composition. Its `-deleted` flag
   is the shortest demonstration of the deleted and recovered walk options.
@@ -162,6 +241,9 @@ writing it to disk. Most of the rest follows from removing what stood in the way
   helpers behind it.
 - `GetDataLen`, `GetValidDataLen`, `GetUsedSpace`, `GetVolumeLabel`,
   `GetClusterOffset`, `HasFatChain`, `IsNotIndexable`, `IsIndexed`.
+- The `DELETED` constant, with the name decoration it existed for.
+- `IMPROVEMENTS.md`, a historical summary whose remaining contents were either done
+  or superseded, and the README section that recommended it as current.
 - Dead internals: `Entry.readNameLen`, `ExFAT.clusterdata`, `readClusters`,
   `nextCluster`, and four write-only `VBR` fields including the misspelt
   `bitmcapCluster`.

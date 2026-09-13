@@ -529,7 +529,7 @@ func TestParseDirDeletedSetKeepsNameInStrictMode(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("parsed %d deleted entries, want 1", len(entries))
 	}
-	if got, want := entries[0].Name(), "erased.txt"+DELETED; got != want {
+	if got, want := entries[0].Name(), "erased.txt"; got != want {
 		t.Fatalf("name = %q, want %q", got, want)
 	}
 	if !entries[0].NameChecksumVerified() {

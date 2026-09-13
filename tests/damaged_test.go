@@ -21,6 +21,9 @@ const (
 	dmDeletedFree  = 38 // deleted; its first cluster is still free
 	dmDeletedTaken = 44 // deleted; its first cluster has been taken again
 	dmDeletedNoFat = 48 // deleted, and the surviving stream extension says NoFatChain
+	dmNoAllocFirst = 50 // live and chained 50 -> 51 -> 52, but its record says no
+	dmNoAllocMid   = 51 // allocation is possible at all
+	dmNoAllocLast  = 52
 
 	// dmSize is three clusters' worth of bytes less a trim, so a result that
 	// locates fewer than three clusters is visibly truncated and one that locates
@@ -63,6 +66,19 @@ func buildDamagedImage(t *testing.T) []byte {
 	setFat(dmBrokenSecond, 0x00000000)
 	markAllocated(dmBrokenFirst)
 	markAllocated(dmBrokenSecond)
+
+	// A live, allocated, perfectly ordinary three-cluster chain whose stream
+	// extension leaves AllocationPossible clear. The specification defines
+	// FirstCluster and DataLength as undefined when that bit is clear, so the record
+	// contradicts itself; nothing else about it is wrong, which is what makes it the
+	// case worth pinning - the ranges are locatable and the contradiction has to be
+	// reported alongside them rather than instead of them.
+	setFat(dmNoAllocFirst, dmNoAllocMid)
+	setFat(dmNoAllocMid, dmNoAllocLast)
+	setFat(dmNoAllocLast, 0xffffffff)
+	markAllocated(dmNoAllocFirst)
+	markAllocated(dmNoAllocMid)
+	markAllocated(dmNoAllocLast)
 
 	// A chain that returns to where it started.
 	setFat(dmLoopFirst, dmLoopSecond)
@@ -113,6 +129,10 @@ func buildDamagedImage(t *testing.T) []byte {
 		name: "deleted-nofatchain.bin", attrs: 0x20, cluster: dmDeletedNoFat, size: dmSize,
 		noFatChain: true, deleted: true,
 	})
+	appendSet(sfEntrySet{
+		name: "no-allocation.bin", attrs: 0x20, cluster: dmNoAllocFirst, size: dmSize,
+		noAllocation: true,
+	})
 
 	return image
 }
@@ -142,14 +162,6 @@ func openDamaged(t *testing.T) *libxfat.ExFAT {
 		t.Fatalf("open damaged volume: %v", err)
 	}
 	return fs
-}
-
-// deletedNamed looks a deleted entry up by the name the library reports for it,
-// which carries a "(deleted)" suffix that the recorded name does not. Spelling
-// that out here keeps the test honest about what Name returns.
-func deletedNamed(t *testing.T, fs *libxfat.ExFAT, name string) libxfat.Entry {
-	t.Helper()
-	return entryNamed(t, fs, name+" (deleted)")
 }
 
 // located describes a Range by cluster, which is what these assertions are
@@ -257,7 +269,7 @@ func TestDamagedLoopedChainKeepsThePrefix(t *testing.T) {
 // be established, and the library does not guess unless it is asked to.
 func TestDamagedDeletedEntryLocatesOnlyItsFirstCluster(t *testing.T) {
 	fs := openDamaged(t)
-	entry := deletedNamed(t, fs, "deleted-free.bin")
+	entry := entryNamed(t, fs, "deleted-free.bin")
 	if !entry.IsDeleted() {
 		t.Fatal("fixture entry deleted-free.bin is not marked deleted")
 	}
@@ -312,7 +324,7 @@ func TestDamagedDeletedEntryReportsAReallocatedFirstCluster(t *testing.T) {
 		{name: "deleted-free.bin", want: false},
 		{name: "deleted-taken.bin", want: true},
 	} {
-		entry := deletedNamed(t, fs, tc.name)
+		entry := entryNamed(t, fs, tc.name)
 		result, err := fs.FragmentOffsetsWithOptions(entry, libxfat.FragmentOptions{})
 		if err != nil {
 			t.Fatalf("%s: FragmentOffsetsWithOptions: %v", tc.name, err)
@@ -331,7 +343,7 @@ func TestDamagedDeletedEntryReportsAReallocatedFirstCluster(t *testing.T) {
 // the one advantage exFAT has here.
 func TestDamagedDeletedNoFatChainNeedsNoAssumption(t *testing.T) {
 	fs := openDamaged(t)
-	entry := deletedNamed(t, fs, "deleted-nofatchain.bin")
+	entry := entryNamed(t, fs, "deleted-nofatchain.bin")
 	if !entry.IsDeleted() || !entry.IsContiguous() {
 		t.Fatalf("fixture entry is deleted=%v contiguous=%v, want both true",
 			entry.IsDeleted(), entry.IsContiguous())
@@ -355,5 +367,102 @@ func TestDamagedDeletedNoFatChainNeedsNoAssumption(t *testing.T) {
 		t.Error("ChainWalked is true although no FAT entry was read")
 	case result.Truncated:
 		t.Error("Truncated is true although the run covers the recorded size")
+	}
+}
+
+// TestDamagedRecordDeclaringNoAllocationIsFlagged covers a record that names a
+// first cluster while its own GeneralSecondaryFlags say no allocation is possible.
+//
+// The specification defines FirstCluster and DataLength as undefined when that bit
+// is clear, so the record contradicts itself. The library's answer is the one it
+// gives everywhere else: locate what the fields point at, and say that the fields
+// were not to be believed. Before this flag existed the contradiction was invisible
+// - only bit 1 was ever read - and these ranges were indistinguishable from ranges
+// located out of a coherent record.
+func TestDamagedRecordDeclaringNoAllocationIsFlagged(t *testing.T) {
+	fs := openDamaged(t)
+	entry := entryNamed(t, fs, "no-allocation.bin")
+
+	if entry.AllocationPossible() {
+		t.Error("AllocationPossible is true for a record that left bit 0 clear")
+	}
+	if got := entry.SecondaryFlags(); got != 0 {
+		t.Errorf("SecondaryFlags = %#02x, want 0x00", got)
+	}
+	if entry.IsContiguous() {
+		t.Error("IsContiguous is true, but no NoFatChain bit was written either")
+	}
+
+	result, err := fs.FragmentOffsetsWithOptions(entry, libxfat.FragmentOptions{})
+	if err != nil {
+		t.Fatalf("FragmentOffsetsWithOptions: %v", err)
+	}
+	if !result.AllocationContradiction {
+		t.Error("AllocationContradiction is false for a self-contradictory record")
+	}
+
+	// The chain is intact and the clusters are consecutive, so the contradiction is
+	// the only thing wrong: one run, trimmed to the recorded size, from the FAT.
+	assertRanges(t, fs, result.Ranges, []located{
+		{cluster: dmNoAllocFirst, count: dmClusters, length: dmSize},
+	})
+	if !result.ChainWalked {
+		t.Error("ChainWalked is false, but these runs came from the FAT")
+	}
+	for name, flag := range map[string]bool{
+		"Truncated":    result.Truncated,
+		"ChainBroken":  result.ChainBroken,
+		"LoopDetected": result.LoopDetected,
+		"Assumed":      result.Assumed,
+		"NoFatChain":   result.NoFatChain,
+	} {
+		if flag {
+			t.Errorf("%s is true for an intact chain", name)
+		}
+	}
+}
+
+// TestDamagedOrdinaryRecordIsNotFlagged is the other half: the contradiction must
+// not fire on the records every volume is full of, or it says nothing.
+func TestDamagedOrdinaryRecordIsNotFlagged(t *testing.T) {
+	fs := openDamaged(t)
+
+	for _, name := range []string{"broken.bin", "looped.bin", "readme.txt", "fragmented.bin"} {
+		entry := entryNamed(t, fs, name)
+		if !entry.AllocationPossible() {
+			t.Errorf("%s: AllocationPossible is false for a conformant record", name)
+		}
+
+		result, err := fs.FragmentOffsetsWithOptions(entry, libxfat.FragmentOptions{})
+		if err != nil {
+			t.Fatalf("%s: FragmentOffsetsWithOptions: %v", name, err)
+		}
+		if result.AllocationContradiction {
+			t.Errorf("%s: AllocationContradiction is true for a conformant record", name)
+		}
+	}
+}
+
+// TestDamagedMetadataStreamsClaimTheirAllocation covers the entries whose records
+// have no GeneralSecondaryFlags field at all. $BitMap and $UpCase state their
+// allocation through their own FirstCluster and DataLength, and the synthetic
+// region entries are byte ranges the library invented; neither may be reported as
+// contradicting a flag it never carried.
+func TestDamagedMetadataStreamsClaimTheirAllocation(t *testing.T) {
+	fs := openDamaged(t)
+
+	for _, name := range []string{"$BitMap", "$UpCase", "$MBR", "$FAT1"} {
+		entry := entryNamed(t, fs, name)
+		if !entry.AllocationPossible() {
+			t.Errorf("%s: AllocationPossible is false, but the stream has an allocation", name)
+		}
+
+		result, err := fs.FragmentOffsetsWithOptions(entry, libxfat.FragmentOptions{})
+		if err != nil {
+			t.Fatalf("%s: FragmentOffsetsWithOptions: %v", name, err)
+		}
+		if result.AllocationContradiction {
+			t.Errorf("%s: AllocationContradiction is true for a record with no such flag", name)
+		}
 	}
 }

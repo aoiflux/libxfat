@@ -163,7 +163,11 @@ type Entry struct {
 	createdUtcOffset  byte
 	accessedUtcOffset byte
 	nameLen           byte
-	noFatChain        bool
+	// secondaryFlags is GeneralSecondaryFlags as recorded in the entry's stream
+	// extension entry, kept raw so that a report can quote a bit this library
+	// does not interpret. The library synthesises a value for the entries it
+	// invents, which have no stream extension of their own to quote.
+	secondaryFlags byte
 	// isRegion marks a synthetic entry that maps onto a fixed byte range of the
 	// image ($MBR, $FAT1, $FAT2) rather than onto a cluster chain.
 	isRegion bool
@@ -301,8 +305,12 @@ func (e Entry) RecordedNameHash() (uint16, bool) {
 }
 
 // RawName returns the name exactly as recorded on the volume, without the
-// deleted marker, the placeholder given to a nameless entry, or any path a
-// caller has composed onto Name.
+// placeholder given to a nameless entry and without any path a caller has
+// composed onto Name.
+//
+// Since Name stopped carrying the deleted marker the two differ only for an entry
+// with no usable name of its own, where this is empty and Name holds the
+// placeholder, and for a caller that has written a path into Name.
 func (e Entry) RawName() string {
 	return e.rawName
 }
@@ -310,6 +318,22 @@ func (e Entry) RawName() string {
 func (e Entry) NameLength() byte {
 	return e.nameLen
 }
+
+// Name is the entry's name as recorded on the volume.
+//
+// It is the name for every entry the library reports, deleted ones included:
+// nothing is appended to mark a deletion, and nothing else is decorated onto it.
+// Earlier releases appended " (deleted)" here, which made a name that could not be
+// compared against the same file seen by another tool or by an earlier reading of
+// the same volume, and which the library then had to strip back off internally to
+// use. Branch on IsDeleted and render the distinction however suits the caller.
+//
+// Two cases are still not a name off the disk, and both are asked about rather
+// than signalled in the string: an entry whose name records held nothing usable
+// carries a placeholder, which HasSyntheticName reports, and the entries the
+// library invents for the metadata regions carry the names it gave them, which
+// IsVirtualEntry reports. RawName is this same value for anything parsed from a
+// volume, and is what name-hash verification uses.
 func (e Entry) Name() string {
 	return e.name
 }
@@ -337,7 +361,46 @@ func (e Entry) Size() uint64 {
 // It says what the volume recorded, not what the library verified. FragmentResult's
 // NoFatChain field carries the same fact alongside the runs actually located.
 func (e Entry) IsContiguous() bool {
-	return e.noFatChain
+	return e.secondaryFlags&NOT_FAT_CHAIN_FLAG != 0
+}
+
+// AllocationPossible reports the AllocationPossible bit of the entry's
+// GeneralSecondaryFlags: whether FirstCluster and Size mean anything at all.
+//
+// The specification defines both as undefined when this is clear, so an entry
+// that reports false while naming a first cluster is self-contradictory. The
+// library locates the data anyway and flags the contradiction rather than
+// discarding a lead - see FragmentResult.AllocationContradiction - because a
+// cluster number written into a record is evidence whether or not the flag beside
+// it agrees.
+//
+// Every formatter sets this bit on a stream that has an allocation, so false is
+// either a stream with no allocation at all or a record worth looking at closely.
+// It is true for the entries the library synthesises for the metadata regions:
+// their byte ranges are real, and the flag is the library's statement about them
+// rather than a volume's.
+func (e Entry) AllocationPossible() bool {
+	return e.secondaryFlags&ALLOCATION_POSSIBLE_FLAG != 0
+}
+
+// SecondaryFlags is the raw GeneralSecondaryFlags byte from the entry's stream
+// extension entry. Prefer IsContiguous and AllocationPossible; this is here so
+// that a report can quote the field including any bit this library does not
+// interpret, which is the same reason ExFAT.VolumeFlags exists.
+//
+// For an entry the library synthesised it is the value the library chose, not one
+// read off the volume.
+func (e Entry) SecondaryFlags() byte {
+	return e.secondaryFlags
+}
+
+// hasStreamExtension reports whether the entry was assembled from an entry set
+// that has a stream extension entry, which is the only record GeneralSecondaryFlags
+// appears in. It is true for files and directories, live or deleted, and false for
+// the metadata records and the synthetic entries, whose flags the library states
+// rather than reads.
+func (e Entry) hasStreamExtension() bool {
+	return entryTypeNormal(e.etype) == (EXFAT_DIRRECORD_FILEDIR&0x7F) && !e.IsSpecialFile()
 }
 
 // IsInUse reports whether the entry set's primary record carries the InUse bit -
@@ -351,9 +414,7 @@ func (e Entry) IsDeleted() bool {
 	return entryTypeNormal(e.etype) == (EXFAT_DIRRECORD_FILEDIR&0x7F) && !entryInUse(e.etype)
 }
 func (e Entry) HasNoName() bool {
-	ename := strings.TrimSpace(e.name)
-	ename = strings.TrimSuffix(ename, DELETED)
-	ename = strings.ReplaceAll(ename, " ", "")
+	ename := strings.ReplaceAll(e.name, " ", "")
 	return ename == ""
 }
 func (e Entry) NonParsable() bool {

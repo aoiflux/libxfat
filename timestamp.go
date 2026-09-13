@@ -26,27 +26,33 @@ const (
 // Timestamps carries the full temporal picture of an entry, including the
 // provenance needed to defend it: whether each reading was anchored by a
 // recorded UTC offset, or merely assumed to be UTC because none was stored.
+//
+// The JSON tags are here because this type is embedded in a report row. A
+// timestamp the volume does not record is omitted, since a zero time in a document
+// reads as the first second of 1970 or of year one depending on who parses it;
+// the offset-validity flags are never omitted, because they are provenance and a
+// missing one would be indistinguishable from a recorded offset of zero.
 type Timestamps struct {
 	// Modified, Created and Accessed are normalised to UTC. A zero value means
 	// the entry carries no usable timestamp in that slot; test with IsZero.
-	Modified time.Time
-	Created  time.Time
-	Accessed time.Time
+	Modified time.Time `json:"modified,omitzero"`
+	Created  time.Time `json:"created,omitzero"`
+	Accessed time.Time `json:"accessed,omitzero"`
 
 	// ModifiedLocal, CreatedLocal and AccessedLocal are the wall-clock readings
 	// exactly as stored on the volume. When the corresponding OffsetValid field
 	// is true they carry a fixed zone, so formatting them shows the offset the
 	// volume recorded; otherwise their location is UTC by assumption.
-	ModifiedLocal time.Time
-	CreatedLocal  time.Time
-	AccessedLocal time.Time
+	ModifiedLocal time.Time `json:"modified_local,omitzero"`
+	CreatedLocal  time.Time `json:"created_local,omitzero"`
+	AccessedLocal time.Time `json:"accessed_local,omitzero"`
 
 	// *OffsetValid reports whether the volume actually recorded a UTC offset for
 	// that timestamp. When false, the UTC value is the stored wall clock taken
 	// at face value and may be wrong by the writing system's zone.
-	ModifiedOffsetValid bool
-	CreatedOffsetValid  bool
-	AccessedOffsetValid bool
+	ModifiedOffsetValid bool `json:"modified_offset_valid"`
+	CreatedOffsetValid  bool `json:"created_offset_valid"`
+	AccessedOffsetValid bool `json:"accessed_offset_valid"`
 }
 
 // decodeTimestamp unpacks one exFAT timestamp.

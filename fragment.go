@@ -89,6 +89,19 @@ type FragmentResult struct {
 	// LoopDetected is true when the chain revisited a cluster. The walk stops at
 	// the repeat; the runs before it remain valid.
 	LoopDetected bool `json:"loop_detected"`
+	// AllocationContradiction is true when the entry's stream extension left the
+	// AllocationPossible bit clear while still naming a first cluster and a
+	// non-zero length.
+	//
+	// The specification defines FirstCluster and DataLength as undefined when that
+	// bit is clear, so such a record contradicts itself and the ranges here were
+	// located from fields the volume declared meaningless. They are returned
+	// regardless - a cluster number written into a record is a lead whether or not
+	// the flag beside it agrees - but nothing else in this result distinguishes them
+	// from ranges located from a coherent record, which is what this flag is for.
+	// Every formatter sets the bit, so a true here is either a damaged or
+	// hand-edited record or an implementation that never wrote the flag at all.
+	AllocationContradiction bool `json:"allocation_contradiction"`
 	// FirstClusterReallocated is true for a deleted entry whose first cluster is
 	// now marked in use, meaning its content was most likely overwritten by a
 	// later file. Recovery from these ranges is unlikely to succeed. It is false
@@ -327,7 +340,7 @@ func (e *ExFAT) contiguousResult(entry Entry, assumed bool) (*FragmentResult, er
 
 	result := &FragmentResult{
 		Ranges:         []Range{run},
-		NoFatChain:     entry.noFatChain,
+		NoFatChain:     entry.IsContiguous(),
 		Assumed:        assumed,
 		ValidBytes:     validBytes,
 		ClustersWalked: uint32(count),
@@ -405,7 +418,7 @@ func (e *ExFAT) deletedResult(entry Entry, opts FragmentOptions) (*FragmentResul
 	var err error
 
 	switch {
-	case entry.noFatChain:
+	case entry.IsContiguous():
 		result, err = e.contiguousResult(entry, false)
 	case opts.AssumeContiguous:
 		result, err = e.contiguousResult(entry, true)
@@ -526,6 +539,24 @@ func (e *ExFAT) FragmentOffsets(entry Entry) ([]Range, error) {
 // ranges intact, because a file located as far as it can be is more useful than
 // an error, and a caller that cannot tell the difference has been misled.
 func (e *ExFAT) FragmentOffsetsWithOptions(entry Entry, opts FragmentOptions) (*FragmentResult, error) {
+	result, err := e.locateRanges(entry, opts)
+	if err != nil {
+		return nil, err
+	}
+	// Checked here rather than in each path below, so that no way of arriving at a
+	// set of ranges can quietly omit it. Reaching this point at all means the record
+	// named a first cluster and a non-zero length, which is what makes a clear
+	// AllocationPossible bit a contradiction rather than simply an entry with no
+	// allocation to describe.
+	if entry.hasStreamExtension() && !entry.AllocationPossible() {
+		result.AllocationContradiction = true
+	}
+	return result, nil
+}
+
+// locateRanges is the dispatch: each kind of entry has one way its extents can
+// honestly be derived, and this chooses it.
+func (e *ExFAT) locateRanges(entry Entry, opts FragmentOptions) (*FragmentResult, error) {
 	// An entry with no allocation has no extents. This is not a degraded result:
 	// there is nothing to locate, and a zero-length file is a normal thing to be.
 	if entry.dataLen == 0 {
@@ -548,7 +579,7 @@ func (e *ExFAT) FragmentOffsetsWithOptions(entry Entry, opts FragmentOptions) (*
 	if entry.IsDeleted() {
 		return e.deletedResult(entry, opts)
 	}
-	if entry.noFatChain {
+	if entry.IsContiguous() {
 		return e.contiguousResult(entry, false)
 	}
 	return e.walkResult(entry, opts)

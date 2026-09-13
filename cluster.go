@@ -137,7 +137,7 @@ func (v *VBR) visitEntryData(entry Entry, visitor func(cluster uint32, data []by
 		return nil
 	}
 
-	if entry.noFatChain {
+	if entry.IsContiguous() {
 		sizeInClusters, _ := v.size2Clusters(entry.dataLen)
 		err := v.visitContiguousClusters(entry.entryCluster, sizeInClusters, visitChunk)
 		if errors.Is(err, errStopClusterWalk) {
@@ -190,7 +190,7 @@ func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
 		clusterList []uint32
 		err         error
 	)
-	if entry.noFatChain {
+	if entry.IsContiguous() {
 		clusterList = getRange(entry.entryCluster, sizeInClusters)
 	} else {
 		clusterList, err = v.getChainedClusterList(entry.entryCluster, sizeInClusters)
@@ -295,7 +295,7 @@ func (v *VBR) countClusters(entry Entry) (int, error) {
 	if entry.dataLen == 0 {
 		return 0, nil
 	}
-	if entry.noFatChain {
+	if entry.IsContiguous() {
 		sizeInClusters, _ := v.size2Clusters(entry.dataLen)
 		return int(sizeInClusters), nil
 	}

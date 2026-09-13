@@ -133,8 +133,9 @@ func (e *ExFAT) Walk(ctx context.Context,
 // ContiguousFilePaths, which rewrites the name into the path and in doing
 // so loses the name.
 //
-// A deleted entry's name carries the library's deleted marker, so its path does
-// too. Entry.RawName is the name as recorded on the volume, without it.
+// A deleted entry's path is composed from the name the volume recorded, with no
+// marker appended to either. Entry.IsDeleted is what says the record is deleted; a
+// caller rendering the tree for a person decides how to show that.
 //
 // parentFirstCluster is the first cluster of the directory the entry was read
 // from, which for the root's children is the volume's real root directory cluster

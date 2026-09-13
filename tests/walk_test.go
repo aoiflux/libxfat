@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -165,9 +166,9 @@ func TestWalkDeletedEntriesAreOptIn(t *testing.T) {
 
 	found := -1
 	for i, path := range withDeleted {
-		// The library decorates a deleted entry's name, so the path carries the
-		// marker too; RawName is the undecorated name.
-		if strings.HasPrefix(path, deletedPath) {
+		// The path is the recorded name with nothing appended, deletion included,
+		// which is what makes it comparable against the same file seen live.
+		if path == deletedPath {
 			found = i
 			break
 		}
@@ -317,7 +318,7 @@ func TestWalkMaxDepthTruncates(t *testing.T) {
 func TestWalkDescendsADeletedDirectory(t *testing.T) {
 	fs := openSuperfloppy(t, true)
 
-	const child = "/docs/gone (deleted)/vanished.txt (deleted)"
+	const child = "/docs/gone/vanished.txt"
 
 	for _, opts := range []libxfat.WalkOptions{
 		{},
@@ -451,5 +452,52 @@ func TestWalkCycleGuardTerminates(t *testing.T) {
 	}
 	if got := counts["/docs/nested/notes.txt"]; got != 0 {
 		t.Errorf("the cycle was followed: /docs/nested/notes.txt reported %d times", got)
+	}
+}
+
+// TestWalkNamesAreUndecorated pins that a reported name is the name the volume
+// recorded and nothing else.
+//
+// Releases before v2 appended " (deleted)" to a deleted entry's name, which put
+// the marker into every path composed from it. That made a deleted record's path
+// impossible to compare against the same file seen live, or against another tool's
+// output, and the library itself had to strip the suffix back off internally to
+// answer HasNoName. IsDeleted is the flag; rendering is the caller's business.
+func TestWalkNamesAreUndecorated(t *testing.T) {
+	fs := openSuperfloppy(t, true)
+
+	records := walkAll(t, fs, libxfat.WalkOptions{
+		IncludeDeleted:            true,
+		DescendDeletedDirectories: true,
+	})
+
+	var sawDeleted bool
+	for _, record := range records {
+		if strings.Contains(record.path, "(deleted)") {
+			t.Errorf("path %q carries a marker the volume never recorded", record.path)
+		}
+		if !record.entry.IsDeleted() {
+			continue
+		}
+		sawDeleted = true
+		// A synthetic placeholder is the one name that is not off the disk, and it
+		// is reported through HasSyntheticName rather than in the string.
+		if record.entry.HasSyntheticName() {
+			continue
+		}
+		if got, want := record.entry.Name(), record.entry.RawName(); got != want {
+			t.Errorf("deleted entry Name() = %q, RawName() = %q; they must agree", got, want)
+		}
+	}
+	if !sawDeleted {
+		t.Fatal("walk reported no deleted entries, so nothing was checked")
+	}
+
+	// The deleted directory and its child are reachable by their recorded names.
+	paths := walkPaths(records)
+	for _, want := range []string{"/docs/erased.txt", "/docs/gone", "/docs/gone/vanished.txt"} {
+		if !slices.Contains(paths, want) {
+			t.Errorf("walk did not report %q; got %q", want, paths)
+		}
 	}
 }

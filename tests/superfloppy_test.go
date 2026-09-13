@@ -126,6 +126,12 @@ type sfEntrySet struct {
 	size       uint64
 	noFatChain bool
 	deleted    bool
+	// noAllocation clears the AllocationPossible bit while the record still names a
+	// first cluster and a size, which is the self-contradiction
+	// FragmentResult.AllocationContradiction reports. Only the damaged fixture sets
+	// it: a record like this is non-conformant by construction, and the superfloppy
+	// image exists to be blessed by a third-party checker.
+	noAllocation bool
 	// validSize is ValidDataLength when set. A pointer rather than a plain
 	// uint64 because zero is a meaningful value - an allocation nothing was ever
 	// written into - and cannot double as "same as size".
@@ -232,7 +238,10 @@ func sfBuildEntrySet(s sfEntrySet) []byte {
 	// and an independent parser reads bit 0 to decide whether FirstCluster means
 	// anything at all - so leaving it clear made the whole fixture non-conformant
 	// while libxfat, which only ever tested bit 1, read it happily.
-	stream[1] = 0x01
+	stream[1] = libxfat.ALLOCATION_POSSIBLE_FLAG
+	if s.noAllocation {
+		stream[1] = 0
+	}
 	if s.noFatChain {
 		stream[1] |= libxfat.NOT_FAT_CHAIN_FLAG
 	}
@@ -627,8 +636,8 @@ func TestSuperfloppyStrictYieldsNames(t *testing.T) {
 
 	want := []string{
 		"$BitMap", "$FAT1", "$MBR", "$OrphanFiles", "$UpCase",
-		"buried.txt", "deep.bin", "descending.bin", "docs", "erased.txt (deleted)",
-		"fragmented.bin", "gone (deleted)", "nested", "notes.txt", "readme.txt",
+		"buried.txt", "deep.bin", "descending.bin", "docs", "erased.txt",
+		"fragmented.bin", "gone", "nested", "notes.txt", "readme.txt",
 		"threerun.bin", "unwritten.bin",
 		sfUnnamedDirName, sfLongName, sfUnicodeName,
 	}

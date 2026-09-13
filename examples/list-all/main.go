@@ -74,12 +74,17 @@ func main() {
 	}
 }
 
+// entryKind names the same five kinds a report row carries, and in the same order:
+// the synthetic entries are special files too, so classifying them first is what
+// keeps "region" and "virtual" from being folded into "metadata".
 func entryKind(entry libxfat.Entry) string {
 	switch {
-	case entry.IsSpecialFile():
-		return "metadata"
+	case entry.IsRegion():
+		return "region"
 	case entry.IsVirtualEntry():
 		return "virtual"
+	case entry.IsSpecialFile():
+		return "metadata"
 	case entry.IsDir():
 		return "directory"
 	default:
@@ -97,6 +102,12 @@ func entryMarks(entry libxfat.Entry) string {
 	}
 	if entry.Size() != entry.ValidDataSize() {
 		marks = append(marks, "partly-unwritten")
+	}
+	// A record naming a first cluster while its own flags say no allocation is
+	// possible contradicts itself. Every formatter sets the bit, so this marks a
+	// record worth looking at rather than a routine case.
+	if entry.Size() > 0 && !entry.AllocationPossible() {
+		marks = append(marks, "no-allocation-flag")
 	}
 	if len(marks) == 0 {
 		return "-"

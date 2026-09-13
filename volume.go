@@ -36,15 +36,30 @@ func (e *ExFAT) VolumeFlags() uint16 {
 // ActiveFAT is the index of the FAT the volume says is in use: 0 for the first,
 // 1 for the second.
 //
-// It is only ever 1 on a TexFAT volume, which has two FATs. This library reads the
-// first FAT unconditionally, so on such a volume a chain walk may be reading the
-// inactive copy - which is worth knowing about rather than discovering through
-// results that disagree with another tool's.
+// It is only ever 1 on a TexFAT volume, which has two FATs, and chain walks read
+// the FAT it names - see ActiveFatOffset for the address that follows from it.
+//
+// The index reported here is what the volume recorded, even where that cannot be
+// acted on: a volume claiming one FAT and an active index of 1 is malformed, and
+// this returns the 1 it recorded while the walk keeps reading the only FAT that
+// exists. What the volume says and what can be read from it are two facts, and
+// this accessor is the first of them.
 func (e *ExFAT) ActiveFAT() int {
 	if e.vbr.volumeFlags&VOLUME_FLAG_ACTIVE_FAT != 0 {
 		return 1
 	}
 	return 0
+}
+
+// ActiveFatOffset is the absolute byte offset of the FAT that chain walks
+// actually read.
+//
+// It differs from FatOffset only on a TexFAT volume whose ActiveFAT flag selects
+// the second table. Comparing the two tables is itself an evidentiary exercise -
+// they are both readable as the $FAT1 and $FAT2 virtual entries - and this says
+// which of them every cluster chain this library reports came from.
+func (e *ExFAT) ActiveFatOffset() int64 {
+	return int64(e.vbr.fatStart())
 }
 
 // VolumeDirty reports the VolumeDirty flag: the volume was mounted for writing and
@@ -140,7 +155,7 @@ func (e *ExFAT) FatOffset() int64 {
 
 // FatSize is the size of one FAT in bytes.
 func (e *ExFAT) FatSize() uint64 {
-	return uint64(e.vbr.fatSize) * uint64(e.vbr.sectorSize)
+	return e.vbr.fatBytes()
 }
 
 // FatCount is the number of FATs on the volume: 1 normally, 2 on a TexFAT volume.
