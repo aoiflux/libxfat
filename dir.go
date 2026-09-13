@@ -197,7 +197,15 @@ func (e *ExFAT) ExtractAllFiles(rootEntries []Entry, dstdir string) error {
 // the path first silently dropped $MBR and $FAT1 from the results, which is why
 // this returned two fewer entries than GetIndexableEntries on the same volume.
 func (e *ExFAT) GetFullPathIndexableEntries(entries []Entry, path string) ([]Entry, error) {
+	// Most entries on a volume are indexable, so this level is the best estimate
+	// of the result available before the walk. Seeding from it turns the dozen
+	// doubling reallocations of a large directory into one, and costs at worst a
+	// slice the size of the input the caller already holds. Left nil for an
+	// empty level so the zero case still returns nil, as it always has.
 	var retentries []Entry
+	if len(entries) > 0 {
+		retentries = make([]Entry, 0, len(entries))
+	}
 
 	for _, entry := range entries {
 		indexable := entry.IsIndexable()
@@ -287,11 +295,19 @@ func (e *ExFAT) GetIndexableEntries(rootEntries []Entry) ([]Entry, error) {
 func (e *ExFAT) GetAllEntries(rootEntries []Entry, indexable ...bool) ([]Entry, error) {
 	var flag bool
 	var err error
-	var allEntries []Entry
 	subEntries := rootEntries
 
 	if len(indexable) > 0 {
 		flag = indexable[0]
+	}
+
+	// The first level is a lower bound on the result - every level below adds to
+	// it - so seeding from it never overshoots by more than what the caller is
+	// already holding, and removes the reallocations that dominate the bytes
+	// this walk churns on a wide directory.
+	var allEntries []Entry
+	if len(rootEntries) > 0 {
+		allEntries = make([]Entry, 0, len(rootEntries))
 	}
 
 	for {

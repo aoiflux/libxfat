@@ -185,7 +185,6 @@ func appendUTF16AsUTF8(dst []byte, units []uint16) []byte {
 	return dst
 }
 
-
 func getFileAttributes(attr uint16) string {
 	const char = '-'
 	arc := char

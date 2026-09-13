@@ -61,13 +61,44 @@ type visitState struct {
 	seen map[uint32]struct{}
 }
 
+// Entry is one filesystem object as the library reports it: a real exFAT entry
+// set, or one of the synthetic entries the library invents for regions that have
+// no directory record ($MBR, $FAT1).
+//
+// It is copied by value everywhere and a whole-volume walk holds hundreds of
+// thousands of them, so the fields are grouped widest-first. That grouping is
+// purely a packing concern and carries no meaning; the comments say what each
+// field is for. sizeof is pinned by TestEntrySize.
 type Entry struct {
-	etype        byte
 	dataLen      uint64
-	entryCluster uint32
-	modified     uint32
-	created      uint32
-	accessed     uint32
+	validDataLen uint64
+	// regionOffset is the byte offset of a synthetic region entry; see isRegion.
+	regionOffset uint64
+
+	name string
+	// rawName is the name exactly as decoded from the name records, before any
+	// decoration: no deleted marker, no placeholder, no path prefix. Verifying
+	// the name hash needs the name the volume actually recorded, and callers
+	// routinely rewrite name into a full path.
+	rawName string
+
+	entryCluster   uint32
+	modified       uint32
+	created        uint32
+	accessed       uint32
+	secondaryCount uint32
+	readNameLen    uint32
+
+	entryAttr uint16
+	// expectedSetChecksum and computedSetChecksum are the entry set checksum as
+	// recorded on disk and as recomputed from the set's own bytes.
+	expectedSetChecksum uint16
+	computedSetChecksum uint16
+	// nameHash is the hash of the up-cased name recorded in the stream
+	// extension entry.
+	nameHash uint16
+
+	etype        byte
 	modified10ms byte
 	created10ms  byte
 	// exFAT timestamps are wall-clock readings; these bytes carry the UTC
@@ -76,17 +107,11 @@ type Entry struct {
 	modifiedUtcOffset byte
 	createdUtcOffset  byte
 	accessedUtcOffset byte
-	entryAttr         uint16
-	noFatChain        bool
-	name              string
-	secondaryCount    uint32
 	nameLen           byte
-	readNameLen       uint32
-	validDataLen      uint64
+	noFatChain        bool
 	// isRegion marks a synthetic entry that maps onto a fixed byte range of the
 	// image ($MBR, $FAT1, $FAT2) rather than onto a cluster chain.
-	isRegion     bool
-	regionOffset uint64
+	isRegion bool
 	// nameChecksumChecked records whether the entry set's checksum was compared
 	// against the value recorded on disk. It is false in optimistic mode, where
 	// the comparison is skipped, and false for synthetic and virtual entries,
@@ -94,19 +119,9 @@ type Entry struct {
 	nameChecksumChecked bool
 	// nameChecksumVerified is meaningful only when nameChecksumChecked is set.
 	nameChecksumVerified bool
-	expectedSetChecksum  uint16
-	computedSetChecksum  uint16
 	// nameSynthetic marks an entry whose name records held nothing usable, so
 	// the library supplied a placeholder rather than leaving it unaddressable.
 	nameSynthetic bool
-	// rawName is the name exactly as decoded from the name records, before any
-	// decoration: no deleted marker, no placeholder, no path prefix. Verifying
-	// the name hash needs the name the volume actually recorded, and callers
-	// routinely rewrite name into a full path.
-	rawName string
-	// nameHash is the hash of the up-cased name recorded in the stream
-	// extension entry.
-	nameHash uint16
 }
 
 func (e Entry) IsInvalid() bool {
