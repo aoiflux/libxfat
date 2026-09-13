@@ -41,7 +41,7 @@ func summarise(entries []libxfat.Entry) []string {
 // probe exercises the read paths that matter to a consumer and reduces every
 // result to a canonical line, so two ways of opening the same bytes can be
 // compared exhaustively rather than field by field.
-func probe(t *testing.T, fs libxfat.ExFAT) []string {
+func probe(t *testing.T, fs *libxfat.ExFAT) []string {
 	t.Helper()
 
 	var out []string
@@ -147,7 +147,7 @@ func TestProbeDetectsDifference(t *testing.T) {
 	bitmapOffset := (testDataOffset + (testBitmapCluster - testRootCluster)) * testSectorSize
 	modified[bitmapOffset] ^= 0xFF
 
-	openImage := func(data []byte) libxfat.ExFAT {
+	openImage := func(data []byte) *libxfat.ExFAT {
 		fs, err := libxfat.NewFromReaderAt(bytes.NewReader(data), int64(len(data)), false)
 		if err != nil {
 			t.Fatalf("NewFromReaderAt() error = %v", err)
@@ -195,7 +195,7 @@ func TestOpenMatchesNewFromReaderAt(t *testing.T) {
 	}
 
 	newProbe := probe(t, viaNew)
-	openProbe := probe(t, *viaOpen)
+	openProbe := probe(t, viaOpen)
 
 	if len(newProbe) != len(openProbe) {
 		t.Fatalf("observation count mismatch: %d vs %d", len(newProbe), len(openProbe))

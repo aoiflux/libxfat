@@ -31,22 +31,34 @@ const upcaseCompressionMarker = 0xFFFF
 //
 // Like ensureBitmapEntry, it will read the root directory if it has not been
 // read yet, so call it from a settled state rather than from inside a walk.
+// ensureUpcaseTable loads and decompresses the volume's up-case table if that has
+// not already happened.
+//
+// Like ensureBitmapEntry it calls ReadRootDir with no lock held, because
+// ReadRootDir publishes under the same mutex. Two goroutines arriving together may
+// both decompress the table; storeUpcaseTable keeps whichever finished first, so
+// they agree on one table rather than racing to install different ones.
+//
+// A failure is not latched. The table can be unavailable simply because the root
+// directory has not been read yet, and a later call that can read it must succeed.
 func (e *ExFAT) ensureUpcaseTable() error {
-	if len(e.vbr.upcaseTable) > 0 {
+	if len(e.upcaseTableSnapshot()) > 0 {
 		return nil
 	}
 
-	if e.vbr.upcaseEntry.GetSize() == 0 && e.vbr.dimage != nil && e.vbr.rootDirCluster != 0 {
+	entry := e.upcaseStream()
+	if entry.GetSize() == 0 && e.vbr.dimage != nil && e.vbr.rootDirCluster != 0 {
 		if _, err := e.ReadRootDir(); err != nil {
 			return err
 		}
+		entry = e.upcaseStream()
 	}
-	if e.vbr.upcaseEntry.GetSize() == 0 {
+	if entry.GetSize() == 0 {
 		return ErrUpcaseTableNotFound
 	}
 
-	raw := make([]byte, 0, e.vbr.upcaseEntry.GetSize())
-	err := e.vbr.visitEntryData(e.vbr.upcaseEntry, func(_ uint32, chunk []byte) error {
+	raw := make([]byte, 0, entry.GetSize())
+	err := e.vbr.visitEntryData(entry, func(_ uint32, chunk []byte) error {
 		raw = append(raw, chunk...)
 		return nil
 	})
@@ -57,10 +69,11 @@ func (e *ExFAT) ensureUpcaseTable() error {
 		return ErrUpcaseTableNotFound
 	}
 
-	e.vbr.upcaseTable = decompressUpcaseTable(raw)
-	if len(e.vbr.upcaseTable) == 0 {
+	table := decompressUpcaseTable(raw)
+	if len(table) == 0 {
 		return ErrUpcaseTableNotFound
 	}
+	e.storeUpcaseTable(table)
 	return nil
 }
 
@@ -97,15 +110,22 @@ func decompressUpcaseTable(raw []byte) []uint16 {
 	return table
 }
 
-// upcaseUnit folds one code unit through the volume's table. Units at or past
-// the end of the table map to themselves, which is what the format intends: the
-// table is truncated at the point where every remaining character is its own
-// upper case.
-func (v *VBR) upcaseUnit(unit uint16) uint16 {
-	if int(unit) < len(v.upcaseTable) {
-		return v.upcaseTable[unit]
+// upcaseTable is a volume's decompressed up-case table, indexed by code unit.
+//
+// It is a type rather than a bare slice so that the operations defined in terms
+// of it travel with it. A caller takes one snapshot and folds a whole name
+// through it, instead of reaching back into the volume for every code unit -
+// which is what makes name hashing safe to do from several goroutines.
+type upcaseTable []uint16
+
+// unit folds one code unit. Units at or past the end of the table map to
+// themselves, which is what the format intends: the table is truncated at the
+// point where every remaining character is its own upper case.
+func (t upcaseTable) unit(u uint16) uint16 {
+	if int(u) < len(t) {
+		return t[u]
 	}
-	return unit
+	return u
 }
 
 // nameHash is the NameHash routine from section 7.7.3 of the exFAT
@@ -113,25 +133,25 @@ func (v *VBR) upcaseUnit(unit uint16) uint16 {
 // bytes.
 // It walks the string's runes directly rather than converting to []rune and
 // then to []uint16, which allocated twice per name checked.
-func (v *VBR) nameHash(name string) uint16 {
+func (t upcaseTable) nameHash(name string) uint16 {
 	var hash uint16
 	for _, r := range name {
 		// EncodeRune reports the pair as U+FFFD twice when the rune needs no
 		// surrogates, which is every character in the BMP.
 		high, low := utf16.EncodeRune(r)
 		if high == unicode.ReplacementChar && low == unicode.ReplacementChar {
-			hash = v.hashUnit(hash, uint16(r))
+			hash = t.hashUnit(hash, uint16(r))
 			continue
 		}
-		hash = v.hashUnit(hash, uint16(high))
-		hash = v.hashUnit(hash, uint16(low))
+		hash = t.hashUnit(hash, uint16(high))
+		hash = t.hashUnit(hash, uint16(low))
 	}
 	return hash
 }
 
 // hashUnit folds one code unit into the running hash, up-casing it first.
-func (v *VBR) hashUnit(hash, unit uint16) uint16 {
-	unit = v.upcaseUnit(unit)
+func (t upcaseTable) hashUnit(hash, unit uint16) uint16 {
+	unit = t.unit(unit)
 	hash = ((hash << 15) | (hash >> 1)) + uint16(byte(unit))
 	return ((hash << 15) | (hash >> 1)) + uint16(byte(unit>>8))
 }
@@ -146,9 +166,10 @@ func (e *ExFAT) UpcaseString(s string) (string, error) {
 		return "", err
 	}
 
+	table := e.upcaseTableSnapshot()
 	units := utf16.Encode([]rune(s))
 	for i, unit := range units {
-		units[i] = e.vbr.upcaseUnit(unit)
+		units[i] = table.unit(unit)
 	}
 	return string(utf16.Decode(units)), nil
 }
@@ -159,7 +180,7 @@ func (e *ExFAT) NameHash(name string) (uint16, error) {
 	if err := e.ensureUpcaseTable(); err != nil {
 		return 0, err
 	}
-	return e.vbr.nameHash(name), nil
+	return e.upcaseTableSnapshot().nameHash(name), nil
 }
 
 // VerifyNameHash recomputes the entry's name hash and compares it with the value
@@ -186,7 +207,7 @@ func (e *ExFAT) VerifyNameHash(entry Entry) error {
 		return err
 	}
 
-	computed := e.vbr.nameHash(entry.rawName)
+	computed := e.upcaseTableSnapshot().nameHash(entry.rawName)
 	if computed == entry.nameHash {
 		return nil
 	}

@@ -111,16 +111,14 @@ func putLELongLong(dst []byte, v uint64) {
 
 // newTestParser returns a parser with enough volume geometry for the directory
 // entry validators to accept realistic clusters and lengths.
-func newTestParser(strict bool) *ExFAT {
-	return &ExFAT{
-		optimistic: !strict,
-		vbr: VBR{
-			sectorSize:        512,
-			sectorsPerCluster: 8,
-			clusterSize:       4096,
-			nbClusters:        1024,
-		},
+func newTestParser(strict bool) *dirParser {
+	vbr := &VBR{
+		sectorSize:        512,
+		sectorsPerCluster: 8,
+		clusterSize:       4096,
+		nbClusters:        1024,
 	}
+	return newDirParser(vbr, !strict, false)
 }
 
 // buildDir concatenates entry sets into a directory cluster, terminated by the

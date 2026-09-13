@@ -4,10 +4,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 func parseVBR(src Source) (VBR, error) {
 	var vbr VBR
+	vbr.visitPool = &sync.Pool{}
 	vbr.dimage = src.Reader
 	vbr.base = src.Base
 	vbr.size = src.Size

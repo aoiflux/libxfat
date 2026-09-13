@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 )
 
 type VBR struct {
@@ -31,34 +32,67 @@ type VBR struct {
 	// start of dimage, not to the start of the volume.
 	base int64
 	// size is the length of dimage in bytes, or 0 when it is not known.
-	size           int64
-	volumeLabel    string
-	bitmcapCluster uint32
-	bitmapLength   uint64
-	upcaseCluster  uint32
-	upcaseLength   uint64
-	bitmapEntry    Entry
-	upcaseEntry    Entry
+	size        int64
+	volumeLabel string
+	bitmapEntry Entry
+	upcaseEntry Entry
 	// upcaseTable is the volume's up-case table, decompressed, indexed by code
 	// unit. It is loaded on demand because only name hashing needs it. Units at
 	// or past its end map to themselves.
-	upcaseTable []uint16
-	// visitPool holds the per-walk scratch a cluster walk needs, so a tree walk
-	// does not allocate a read buffer and a loop-detection set for every
+	upcaseTable upcaseTable
+	// visitPool hands out the per-walk scratch a cluster walk needs, so a tree
+	// walk does not allocate a read buffer and a loop-detection set for every
 	// directory it descends into.
-	visitPool []*visitState
+	//
+	// It is a sync.Pool because scratch is now handed out to concurrent walks:
+	// the hand-rolled free list it replaces was mutated without synchronisation,
+	// and two walks sharing it could be given the same state. It is held by
+	// pointer so that a VBR remains copyable - a sync.Pool value would make every
+	// VBR assignment a vet error, and sharing one pool between copies of a volume
+	// is safe, which is the whole point of the type.
+	//
+	// A nil pool is usable: scratch is allocated per walk instead. That keeps a
+	// zero-value VBR, which the unit tests build directly, working.
+	visitPool *sync.Pool
 }
 
-// visitState is the scratch one cluster walk needs: a cluster-sized read buffer
-// and the set that detects a chain looping back on itself.
+// visitState is the scratch a cluster walk needs: the topology scratch every
+// walk needs, plus the cluster-sized read buffer only a walk that reads file
+// data needs.
+//
+// The buffer is allocated on first use rather than up front, because the two
+// kinds of walk have very different costs. Enumerating a file's extents reads
+// only FAT entries, and on a volume with 32 MiB clusters an eagerly allocated
+// buffer is 32 MiB held to read no file data at all.
 //
 // These are pooled rather than held as single shared fields on VBR. Nothing
 // nests a walk inside another today - every visitor is internal and none reads
 // - but a shared buffer would corrupt the outer walk silently if one ever did,
 // and the cost of a free list is the same.
 type visitState struct {
-	buf  []byte
-	seen map[uint32]struct{}
+	walkScratch
+	buf []byte
+}
+
+// ensureBuf returns the cluster-sized read buffer, allocating it on first use.
+func (s *visitState) ensureBuf(v *VBR) []byte {
+	if uint64(len(s.buf)) != v.clusterSize {
+		s.buf = make([]byte, v.clusterSize)
+	}
+	return s.buf
+}
+
+// reset readies pooled scratch for a new walk. The FAT window holds a cursor and
+// the loop set holds the previous walk's clusters, so neither may be inherited; a
+// buffer sized for another volume's geometry is dropped rather than kept.
+func (s *visitState) reset(v *VBR) {
+	s.fat.invalidate()
+	if s.seen != nil {
+		clear(s.seen)
+	}
+	if uint64(len(s.buf)) != v.clusterSize {
+		s.buf = nil
+	}
 }
 
 // Entry is one filesystem object as the library reports it: a real exFAT entry
@@ -296,48 +330,100 @@ func (e Entry) NonParsable() bool {
 	return e.IsDeleted() || e.IsFile() || e.IsInvalid() || e.HasNoName()
 }
 
+// ExFAT is an open exFAT volume.
+//
+// It holds no parse state. Directory parsing keeps its state in a dirParser
+// created per parse, which is what allows one volume to be read from more than
+// one goroutine; see dirParser for why the state was moved off this struct.
 type ExFAT struct {
-	vbr          VBR
-	virtualEntry Entry
-	entry        Entry
-	offset       int
-	remainingSC  int
-	entryState   int
-	clusterdata  []byte
-	dirtype      byte
-	optimistic   bool
+	vbr        VBR
+	optimistic bool
 	// rejectChecksumMismatch drops an entry set whose checksum does not verify
 	// instead of reporting the mismatch on the entry. Off by default: the
 	// parsed name is evidence even when the set around it is damaged.
 	rejectChecksumMismatch bool
-	// Parsing state for filename/checksum assembly
-	setChecksum      uint16
-	expectedChecksum uint16
-	expectedSC       int
-	expectedNameLen  int
-	nameUnits        []uint16
-	// nameBytes is scratch for decoding nameUnits to UTF-8. Neither buffer is
-	// ever handed out: the name a caller receives is a string copied out of
-	// this one, so reuse cannot be observed.
-	nameBytes []byte
-	// setInUse is the allocation state of the primary record that opened the
-	// current set. Secondary records must agree with it, otherwise a deleted
-	// record is being folded into an allocated set or vice versa.
-	setInUse bool
-	// sawStream guards against emitting a set that never carried a stream
-	// extension - it would have no cluster, no length and no name length - and
-	// against a second stream extension decrementing the secondary count twice.
-	sawStream bool
+
+	// metaMu guards the handful of VBR fields that are not known when the volume
+	// is opened: the label and the $BitMap and $UpCase streams, which a root
+	// directory parse discovers, and the up-case table, which is decompressed on
+	// first use. Everything else in vbr is fixed by parseVBR and needs no lock.
+	//
+	// One mutex covers all of them because one parse discovers them together.
+	metaMu sync.RWMutex
 }
 
-func (e *ExFAT) initEntryState(clusetrdata []byte, offset, remainingSC, entryState int) {
-	e.virtualEntry = Entry{}
-	e.entry = Entry{}
-	e.clusterdata = clusetrdata
-	e.offset = offset
-	e.remainingSC = remainingSC
-	e.entryState = entryState
+// volumeMetaKnown reports whether a usable $BitMap entry has been published.
+func (e *ExFAT) volumeMetaKnown() bool {
+	e.metaMu.RLock()
+	defer e.metaMu.RUnlock()
+	return e.vbr.bitmapEntry.name != "" &&
+		e.vbr.bitmapEntry.entryCluster != 0 &&
+		e.vbr.bitmapEntry.dataLen != 0
 }
+
+// bitmapStream returns the published $BitMap entry.
+func (e *ExFAT) bitmapStream() Entry {
+	e.metaMu.RLock()
+	defer e.metaMu.RUnlock()
+	return e.vbr.bitmapEntry
+}
+
+// upcaseStream returns the published $UpCase entry.
+func (e *ExFAT) upcaseStream() Entry {
+	e.metaMu.RLock()
+	defer e.metaMu.RUnlock()
+	return e.vbr.upcaseEntry
+}
+
+// upcaseTableSnapshot returns the decompressed up-case table, or nil when it has
+// not been loaded yet. The slice is never mutated after being stored, so handing
+// it out under a read lock is safe.
+func (e *ExFAT) upcaseTableSnapshot() upcaseTable {
+	e.metaMu.RLock()
+	defer e.metaMu.RUnlock()
+	return e.vbr.upcaseTable
+}
+
+// storeUpcaseTable publishes a decompressed table, keeping whichever was stored
+// first so that two concurrent loads agree on one answer.
+func (e *ExFAT) storeUpcaseTable(table upcaseTable) upcaseTable {
+	e.metaMu.Lock()
+	defer e.metaMu.Unlock()
+	if len(e.vbr.upcaseTable) > 0 {
+		return e.vbr.upcaseTable
+	}
+	e.vbr.upcaseTable = table
+	return table
+}
+
+// publish installs what a root-directory parse discovered about the volume.
+//
+// Only the root parse calls it. These records are root-only by specification, and
+// the parse that finds them is the only one entitled to act on them; see
+// parseOutputs for what went wrong when any directory could.
+func (e *ExFAT) publish(out parseOutputs) {
+	e.metaMu.Lock()
+	defer e.metaMu.Unlock()
+
+	if out.sawLabel {
+		e.vbr.volumeLabel = out.volumeLabel
+	}
+	if out.sawBitmap {
+		e.vbr.bitmapEntry = out.bitmapEntry
+	}
+	if out.sawUpcase {
+		// A table decompressed earlier describes a different $UpCase stream, so
+		// it is dropped rather than reused when the entry changes.
+		if e.vbr.upcaseEntry.entryCluster != out.upcaseEntry.entryCluster ||
+			e.vbr.upcaseEntry.dataLen != out.upcaseEntry.dataLen {
+			e.vbr.upcaseTable = nil
+		}
+		e.vbr.upcaseEntry = out.upcaseEntry
+	}
+}
+
 func (e *ExFAT) GetVolumeLabel() string {
+	e.metaMu.RLock()
+	defer e.metaMu.RUnlock()
 	return e.vbr.volumeLabel
 }

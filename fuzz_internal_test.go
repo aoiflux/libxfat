@@ -41,11 +41,9 @@ func FuzzParseDirChunk(f *testing.F) {
 	f.Add(seed)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		newParser := func(optimistic bool) *ExFAT {
-			exfat := &ExFAT{optimistic: optimistic}
-			exfat.vbr.nbClusters = 64
-			exfat.vbr.clusterSize = 512
-			return exfat
+		newParser := func(optimistic bool) *dirParser {
+			vbr := &VBR{nbClusters: 64, clusterSize: 512}
+			return newDirParser(vbr, optimistic, false)
 		}
 
 		// Verification decides what the library says about an entry set, never

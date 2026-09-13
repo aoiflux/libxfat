@@ -10,9 +10,16 @@ import (
 )
 
 func (e *ExFAT) hasBitmapEntry() bool {
-	return e.vbr.bitmapEntry.GetName() != "" && e.vbr.bitmapEntry.GetEntryCluster() != 0 && e.vbr.bitmapEntry.GetSize() != 0
+	return e.volumeMetaKnown()
 }
 
+// ensureBitmapEntry locates the allocation bitmap, reading the root directory if
+// that has not happened yet.
+//
+// ReadRootDir is deliberately called with no lock held: it publishes what it finds
+// under metaMu, so calling it from inside that lock would deadlock. The state is
+// re-checked afterwards because another goroutine may have published in between,
+// which is fine - both would have found the same entry.
 func (e *ExFAT) ensureBitmapEntry() error {
 	if e.hasBitmapEntry() {
 		return nil
@@ -28,105 +35,6 @@ func (e *ExFAT) ensureBitmapEntry() error {
 	return nil
 }
 
-func (e *ExFAT) resetSetAssembly() {
-	e.setChecksum = 0
-	e.expectedChecksum = 0
-	e.expectedSC = 0
-	e.expectedNameLen = 0
-	// Truncated rather than dropped: the parser owns this buffer, never hands
-	// it out, and reassembles a name into it for every entry set on the volume.
-	e.nameUnits = e.nameUnits[:0]
-	e.setInUse = false
-	e.sawStream = false
-}
-
-// beginEntrySet starts assembling a new file entry set from its primary record.
-// The pending entry is cleared first: an earlier set that was abandoned partway
-// through - a truncated directory, a damaged secondary - would otherwise leave
-// its cluster and length behind for this one to inherit.
-func (e *ExFAT) beginEntrySet(rec dirRecordView) {
-	e.entry = Entry{}
-	e.resetSetAssembly()
-
-	e.setChecksum = exfatDirSetChecksumAdd(0, rec.data, true)
-	e.setInUse = entryInUse(rec.typeByte())
-	e.populateDirRecordDel(rec)
-	e.expectedSC = int(e.entry.secondaryCount)
-	e.expectedChecksum = uint16(rec.byteAt(2)) | (uint16(rec.byteAt(3)) << 8)
-}
-
-// secondaryBelongsToSet reports whether a secondary record's allocation state
-// agrees with the primary that opened the set. Type validation masks off the
-// in-use bit, so without this a 0x41 name record would be accepted into an
-// allocated 0x85 set, splicing a deleted name onto a live file.
-func (e *ExFAT) secondaryBelongsToSet(rec dirRecordView) bool {
-	return e.entryState == ENTRY_STATE_85_SEEN && entryInUse(rec.typeByte()) == e.setInUse
-}
-
-// finishEntrySet completes the pending entry set and appends it to entries.
-//
-// The assembled name is always stored. A checksum mismatch says the set is
-// damaged, which is a fact worth reporting about the entry - it is not a reason
-// to replace the only copy of the name with an empty string, which is what this
-// used to do in strict mode, silently rendering every entry on the volume
-// nameless and every directory unreadable.
-func (e *ExFAT) finishEntrySet(entries *[]Entry) {
-	// Name records are fixed at 15 code units each, so the last one is padded
-	// past the end of the name. A formatter zeroes that padding, but a record
-	// reused by a later, shorter name need not: NameLength is what says where
-	// the name actually stops, and without this the residue is read as part of
-	// it.
-	if e.expectedNameLen > 0 && len(e.nameUnits) > e.expectedNameLen {
-		e.nameUnits = e.nameUnits[:e.expectedNameLen]
-	}
-
-	checked := !e.optimistic
-	verified := e.expectedChecksum == e.setChecksum
-
-	// Decoded through a buffer the parser owns, so the name costs the one
-	// allocation the caller keeps and nothing else.
-	e.nameBytes = appendUTF16AsUTF8(e.nameBytes[:0], dropNULs(e.nameUnits))
-	name := string(e.nameBytes)
-	e.entry.rawName = name
-
-	// A set whose name records are empty or all NUL leaves nothing to call the
-	// entry by, and a directory with no name is treated as unreadable, so the
-	// whole subtree below it would disappear without a word. An entry is located
-	// by its cluster, not by its name, so there is no reason to lose it: stand a
-	// placeholder in, keyed to the cluster so it is stable across runs, and
-	// record that the name did not come off the disk.
-	if name == "" {
-		name = unnamedEntryName(e.entry.entryCluster)
-		e.entry.nameSynthetic = true
-	}
-
-	e.entry.name = name
-	e.entry.nameChecksumChecked = checked
-	e.entry.nameChecksumVerified = verified
-	e.entry.expectedSetChecksum = e.expectedChecksum
-	e.entry.computedSetChecksum = e.setChecksum
-
-	if e.entry.IsDeleted() {
-		e.entry.name += DELETED
-	}
-
-	drop := checked && !verified && e.rejectChecksumMismatch
-	if !drop {
-		*entries = append(*entries, e.entry)
-	}
-
-	e.entry = Entry{}
-	e.entryState = ENTRY_STATE_LAST_C1_SEEN
-	e.resetSetAssembly()
-}
-
-func (e *ExFAT) clearParsedEntry() {
-	e.entry = Entry{}
-	e.entryState = ENTRY_STATE_START
-	e.remainingSC = 0
-	e.resetSetAssembly()
-}
-
 // GetAllocatedClusters function is experimental, it may not work correctly all the time
 // It has been tested to work correctly if used directly after parsing root entries
 func (e *ExFAT) GetAllocatedClusters() (uint32, error) {
@@ -135,7 +43,7 @@ func (e *ExFAT) GetAllocatedClusters() (uint32, error) {
 	}
 
 	counter := bitmapCounter{}
-	err := e.vbr.visitEntryData(e.vbr.bitmapEntry, func(_ uint32, chunk []byte) error {
+	err := e.vbr.visitEntryData(e.bitmapStream(), func(_ uint32, chunk []byte) error {
 		counter.write(chunk)
 		return nil
 	})
@@ -168,13 +76,39 @@ func (e *ExFAT) GetClusterSize() uint64 {
 // entries report IsInvalid, because they are not file entry sets, but they do
 // have recoverable content and refusing them left them visible yet unreadable.
 func (e *ExFAT) ExtractEntryContent(entry Entry, dstpath string) error {
-	if entry.IsDeleted() {
-		return ErrDeletedEntry
+	file, err := e.OpenEntry(entry)
+	if err != nil {
+		return err
 	}
-	if !entry.IsRegion() && !entry.IsMetadataStream() && entry.IsInvalid() {
-		return ErrInvalidEntry
+
+	// Created before the zero-length check, so that an entry with no content
+	// still yields an empty file rather than leaving the destination absent.
+	dstfile, err := os.Create(dstpath)
+	if err != nil {
+		return err
 	}
-	return e.vbr.extractEntryContent(entry, dstpath)
+	defer dstfile.Close()
+
+	if entry.dataLen == 0 {
+		return nil
+	}
+
+	// One io.Copy over the entry's extents, in place of the three near-identical
+	// region, contiguous and chained extractors this used to dispatch between.
+	// A region is now simply a result with one range, which is what made them
+	// collapse.
+	if _, err := file.WriteTo(dstfile); err != nil {
+		return err
+	}
+
+	// A short chain is reported, not silently written as a shorter file. The
+	// bytes that were recovered are already on disk; the error says they are
+	// not the whole of what the entry claims.
+	if located, err := file.Located(); err == nil && located < file.Size() {
+		return fmt.Errorf("%w: %d of %d bytes recoverable for %q",
+			ErrTruncatedChain, located, file.Size(), entry.GetName())
+	}
+	return nil
 }
 
 func (e *ExFAT) ExtractAllFiles(rootEntries []Entry, dstdir string) error {
@@ -263,7 +197,7 @@ func (e *ExFAT) getAllEntriesInfo(entries []Entry, path, dstdir string, long, si
 	return nil
 }
 
-func (e ExFAT) processEntry(entry Entry, path, dstdir string, extract, long, simple bool) error {
+func (e *ExFAT) processEntry(entry Entry, path, dstdir string, extract, long, simple bool) error {
 	if extract {
 		relDir := strings.Trim(path, "/\\")
 		dstpath := filepath.Join(dstdir, filepath.FromSlash(relDir), entry.name)
@@ -387,11 +321,19 @@ func (e *ExFAT) RecoverDeletedEntries() ([]Entry, error) {
 	state := e.vbr.acquireVisit()
 	defer e.vbr.releaseVisit(state)
 
+	// One parser for the whole scan. Its outputs are discarded: a $BitMap or
+	// $UpCase record carved out of an unallocated cluster describes a volume
+	// state that no longer holds, and believing it would repoint the very
+	// structures this scan is driven by.
+	parser := newDirParser(&e.vbr, e.optimistic, e.rejectChecksumMismatch)
+
 	for _, cluster := range unallocated {
-		if err := e.vbr.readClusterInto(cluster, state.buf); err != nil {
+		buf := state.ensureBuf(&e.vbr)
+		if err := e.vbr.readClusterInto(cluster, buf); err != nil {
 			return nil, err
 		}
-		deleted = append(deleted, e.parseDeletedDirEntries(state.buf)...)
+		parser.resetDirParser()
+		deleted = append(deleted, parser.parseDeletedDirEntries(buf)...)
 	}
 
 	return deleted, nil
@@ -404,7 +346,7 @@ func (e *ExFAT) getUnallocatedClusters() ([]uint32, error) {
 
 	var unallocated []uint32
 	clusterIndex := uint32(0)
-	err := e.vbr.visitEntryData(e.vbr.bitmapEntry, func(_ uint32, chunk []byte) error {
+	err := e.vbr.visitEntryData(e.bitmapStream(), func(_ uint32, chunk []byte) error {
 		for _, b := range chunk {
 			for bit := 0; bit < 8 && clusterIndex < e.vbr.nbClusters; bit++ {
 				allocated := (b & (1 << bit)) != 0
@@ -446,291 +388,43 @@ func (e *ExFAT) GetUsedSpace() string {
 	return fmt.Sprintf("%d%%", e.vbr.percentInUse)
 }
 
-func (e *ExFAT) resetDirParser() {
-	e.initEntryState(nil, 0, 0, ENTRY_STATE_START)
-	e.resetSetAssembly()
-}
-
 func (e *ExFAT) readDirEntries(entry Entry) ([]Entry, error) {
 	var entries []Entry
 	done := false
-	e.resetDirParser()
+	parser := newDirParser(&e.vbr, e.optimistic, e.rejectChecksumMismatch)
 	err := e.vbr.visitEntryData(entry, func(_ uint32, chunk []byte) error {
 		if done {
 			return nil
 		}
-		if e.parseDirChunk(chunk, &entries) {
+		if parser.parseDirChunk(chunk, &entries) {
 			done = true
 		}
 		return nil
 	})
+	// parser.out is deliberately dropped. The volume label and the $BitMap and
+	// $UpCase streams are root-directory records; a record claiming to be one of
+	// them in a subdirectory is malformed, and acting on it would let any
+	// directory on the volume redefine the volume.
 	return entries, err
 }
 
 func (e *ExFAT) readRootDirEntries() ([]Entry, error) {
 	var entries []Entry
 	done := false
-	e.resetDirParser()
+	parser := newDirParser(&e.vbr, e.optimistic, e.rejectChecksumMismatch)
 	err := e.vbr.visitFatChain(e.vbr.rootDirCluster, func(_ uint32, chunk []byte) error {
 		if done {
 			return nil
 		}
-		if e.parseDirChunk(chunk, &entries) {
+		if parser.parseDirChunk(chunk, &entries) {
 			done = true
 		}
 		return nil
 	})
+	// The root directory is the only place the volume's own records legitimately
+	// live, so it is the only parse whose outputs are published.
+	e.publish(parser.out)
 	return entries, err
-}
-
-func (e *ExFAT) parseDir(clusterdata []byte) []Entry {
-	var entries []Entry
-	e.resetDirParser()
-	e.parseDirChunk(clusterdata, &entries)
-	return entries
-}
-
-func (e *ExFAT) parseDeletedDirEntries(clusterdata []byte) []Entry {
-	var entries []Entry
-	e.resetDirParser()
-	e.clusterdata = clusterdata
-
-	for offset := 0; offset+EXFAT_DIRRECORD_SIZE <= len(clusterdata); offset += EXFAT_DIRRECORD_SIZE {
-		rec, ok := newDirRecordView(clusterdata, offset)
-		if !ok {
-			break
-		}
-		e.offset = offset
-		e.dirtype = rec.typeByte()
-
-		if e.dirtype == 0 {
-			e.clearParsedEntry()
-			continue
-		}
-
-		if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
-			e.clearParsedEntry()
-			if e.validateFileDentry(rec.data) {
-				e.beginEntrySet(rec)
-			}
-			continue
-		}
-
-		if (e.dirtype&0x7f) == EXFAT_DIRRECORD_DEL_STREAM_EXT && e.secondaryBelongsToSet(rec) {
-			if !e.sawStream && e.validateFileStreamDentry(rec.data) {
-				e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec.data, false)
-				e.populateDirRecordStreamSeen(rec)
-				e.expectedNameLen = int(e.entry.nameLen)
-				e.sawStream = true
-			}
-			continue
-		}
-
-		if (e.dirtype&0x7f) == EXFAT_DIRRECORD_DEL_FILENAME_EXT && e.secondaryBelongsToSet(rec) {
-			if !e.validateFileNameDentry(rec.data) {
-				continue
-			}
-
-			e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec.data, false)
-			e.nameUnits = appendUTF16LEUnits(e.nameUnits, rec.bytes(2, EXFAT_DIRRECORD_SIZE), 15)
-
-			if e.remainingSC < 1 {
-				continue
-			}
-			e.remainingSC--
-			if e.remainingSC != 0 {
-				continue
-			}
-
-			// A set with no stream extension has no cluster, no length and no
-			// name length; emitting it would invent a file that is not there.
-			if !e.sawStream {
-				e.clearParsedEntry()
-				continue
-			}
-
-			e.finishEntrySet(&entries)
-			e.clearParsedEntry()
-		}
-	}
-
-	return entries
-}
-
-func (e *ExFAT) parseDirChunk(clusterdata []byte, entries *[]Entry) bool {
-	e.clusterdata = clusterdata
-	e.offset = 0
-
-	for e.offset < len(clusterdata) {
-		if clusterdata[e.offset] == 0 {
-			return true
-		}
-
-		rec, ok := newDirRecordView(clusterdata, e.offset)
-		if !ok {
-			return true
-		}
-
-		e.dirtype = rec.typeByte()
-
-		switch e.dirtype {
-		case EXFAT_DIRRECORD_LABEL:
-			// Validate volume label/no-label entry
-			if e.validateVolLabelDentry(rec.data) {
-				e.populateDirRecordLabel(rec)
-			}
-		case EXFAT_DIRRECORD_NOLABEL:
-			e.entry.name = ""
-		case EXFAT_DIRRECORD_BITMAP, EXFAT_DIRRECORD_UPCASE:
-			if (e.dirtype == EXFAT_DIRRECORD_BITMAP && e.validateAllocBitmapDentry(rec.data)) ||
-				(e.dirtype == EXFAT_DIRRECORD_UPCASE && e.validateUpcaseTableDentry(rec.data)) {
-				e.populateRecordBitmapUpcase(rec)
-				*entries = append(*entries, e.virtualEntry)
-			}
-		// These three records carry no content stream. They must be built from a
-		// clean Entry rather than by patching the shared virtualEntry, which
-		// still holds the cluster and length of whichever $BitMap or $UpCase
-		// record was parsed before them.
-		case EXFAT_DIRRECORD_VOLUME_GUID:
-			e.virtualEntry = Entry{etype: e.dirtype, name: VOLUME_GUID}
-			*entries = append(*entries, e.virtualEntry)
-		case EXFAT_DIRRECORD_TEXFAT:
-			e.virtualEntry = Entry{etype: e.dirtype, name: TEXFAT}
-			*entries = append(*entries, e.virtualEntry)
-		case EXFAT_DIRRECORD_ACT:
-			e.virtualEntry = Entry{etype: e.dirtype, name: ACT}
-			*entries = append(*entries, e.virtualEntry)
-		default:
-			if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
-				if e.validateFileDentry(rec.data) {
-					e.beginEntrySet(rec)
-				}
-			}
-			if ((e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_STREAM_EXT) &&
-				e.secondaryBelongsToSet(rec) {
-				if !e.sawStream && e.validateFileStreamDentry(rec.data) {
-					e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec.data, false)
-					e.populateDirRecordStreamSeen(rec)
-					e.expectedNameLen = int(e.entry.nameLen)
-					e.sawStream = true
-				}
-			}
-			// Name records are folded into the checksum only while a set is
-			// open. A stray 0xC1 outside one - slack, or a directory whose
-			// primary record was never parsed - would otherwise corrupt the
-			// running checksum and prepend its bytes to the next real name.
-			if ((e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILENAME_EXT) &&
-				e.secondaryBelongsToSet(rec) {
-				if e.validateFileNameDentry(rec.data) {
-					e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec.data, false)
-
-					raw := rec.bytes(2, EXFAT_DIRRECORD_SIZE)
-					e.nameUnits = appendUTF16LEUnits(e.nameUnits, raw, 15)
-
-					if e.remainingSC >= 1 {
-						e.remainingSC--
-
-						if e.remainingSC == 0 {
-							if e.sawStream {
-								e.finishEntrySet(entries)
-							} else {
-								e.clearParsedEntry()
-							}
-						}
-					}
-				}
-			}
-		}
-
-		e.offset += EXFAT_DIRRECORD_SIZE
-	}
-
-	return false
-}
-
-func (e *ExFAT) populateDirRecordLabel(rec dirRecordView) {
-	count := int(rec.byteAt(1))
-	endOffset := 2 + count*2
-	if endOffset > len(rec.data) {
-		endOffset = len(rec.data)
-	}
-	e.vbr.volumeLabel = unicodeFromAscii(rec.bytes(2, endOffset), count)
-}
-func (e *ExFAT) populateRecordBitmapUpcase(rec dirRecordView) {
-	entryCluster := rec.le32(20)
-	dataLen := rec.le64(24)
-
-	e.virtualEntry.etype = e.dirtype
-	e.virtualEntry.dataLen = dataLen
-	e.virtualEntry.entryCluster = entryCluster
-
-	// no real dates/times
-	e.virtualEntry.modified = 0
-	e.virtualEntry.created = 0
-	e.virtualEntry.accessed = 0
-	e.virtualEntry.modified10ms = 0
-	e.virtualEntry.created10ms = 0
-	e.virtualEntry.modifiedUtcOffset = 0
-	e.virtualEntry.createdUtcOffset = 0
-	e.virtualEntry.accessedUtcOffset = 0
-	e.virtualEntry.entryAttr = 0
-	e.virtualEntry.secondaryCount = 0
-	e.virtualEntry.noFatChain = false
-	e.virtualEntry.isRegion = false
-	e.virtualEntry.regionOffset = 0
-	e.virtualEntry.validDataLen = dataLen
-
-	switch e.dirtype {
-	case EXFAT_DIRRECORD_BITMAP:
-		e.vbr.bitmcapCluster = entryCluster
-		e.vbr.bitmapLength = dataLen
-		e.virtualEntry.name = BITMAP
-		e.vbr.bitmapEntry = e.virtualEntry
-	case EXFAT_DIRRECORD_UPCASE:
-		e.vbr.upcaseCluster = entryCluster
-		e.vbr.upcaseLength = dataLen
-		e.virtualEntry.name = UPCASE
-		e.vbr.upcaseEntry = e.virtualEntry
-		// A table read earlier belongs to a different volume state.
-		e.vbr.upcaseTable = nil
-	}
-}
-func (e *ExFAT) populateDirRecordDel(rec dirRecordView) {
-	e.entry.etype = e.dirtype
-	e.entry.secondaryCount = uint32(rec.byteAt(1))
-	e.entry.entryAttr = rec.le16(4)
-	e.entry.created = rec.le32(8)
-	e.entry.modified = rec.le32(12)
-	e.entry.accessed = rec.le32(16)
-	e.entry.created10ms = rec.byteAt(20)
-	e.entry.modified10ms = rec.byteAt(21)
-	// Without these the timestamps above are unanchored wall-clock readings.
-	e.entry.createdUtcOffset = rec.byteAt(22)
-	e.entry.modifiedUtcOffset = rec.byteAt(23)
-	e.entry.accessedUtcOffset = rec.byteAt(24)
-	e.remainingSC = int(e.entry.secondaryCount)
-	// Both 0x85 (allocated) and 0x05 (deleted) begin a file entry set.
-	if (e.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
-		e.entryState = ENTRY_STATE_85_SEEN
-	}
-}
-func (e *ExFAT) populateDirRecordStreamSeen(rec dirRecordView) {
-	e.entry.nameLen = rec.byteAt(3)
-	e.entry.nameHash = rec.le16(4)
-	e.entry.readNameLen = 0
-	e.entry.entryCluster = rec.le32(20)
-	e.entry.dataLen = rec.le64(24)
-	// ValidDataLength lives at offset 8 of the stream extension entry, not 24.
-	// Reading it from 24 made it a duplicate of DataLength, which hides the
-	// allocated-but-never-written tail that slack analysis depends on.
-	e.entry.validDataLen = rec.le64(8)
-
-	e.entry.noFatChain = false
-	if (rec.byteAt(1) & NOT_FAT_CHAIN_FLAG) != 0 {
-		e.entry.noFatChain = true
-	}
-
-	e.remainingSC--
 }
 
 // createVirtualEntries creates virtual/special entries representing filesystem metadata

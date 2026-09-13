@@ -107,15 +107,15 @@ func TestDecompressUpcaseTableTruncated(t *testing.T) {
 }
 
 func TestUpcaseUnitFallsBackToIdentity(t *testing.T) {
-	v := VBR{upcaseTable: []uint16{0, 1, 2}}
+	v := upcaseTable{0, 1, 2}
 
-	if got := v.upcaseUnit(1); got != 1 {
+	if got := v.unit(1); got != 1 {
 		t.Errorf("in-table unit = %d, want 1", got)
 	}
 	// Past the end of the table, and the format says such units are already
 	// their own upper case.
 	for _, unit := range []uint16{3, 0x1000, 0xFFFF} {
-		if got := v.upcaseUnit(unit); got != unit {
+		if got := v.unit(unit); got != unit {
 			t.Errorf("unit %d past the table = %d, want itself", unit, got)
 		}
 	}
@@ -132,7 +132,7 @@ func TestNameHashMatchesSpec(t *testing.T) {
 			table[i] = uint16(i - 0x20)
 		}
 	}
-	v := VBR{upcaseTable: table}
+	v := upcaseTable(table)
 
 	specHash := func(units []uint16) uint16 {
 		var hash uint16
@@ -155,7 +155,7 @@ func TestNameHashMatchesSpec(t *testing.T) {
 	} {
 		upcased := make([]uint16, 0, len(name))
 		for _, unit := range utf16.Encode([]rune(name)) {
-			upcased = append(upcased, v.upcaseUnit(unit))
+			upcased = append(upcased, v.unit(unit))
 		}
 		if got, want := v.nameHash(name), specHash(upcased); got != want {
 			t.Errorf("nameHash(%q) = 0x%04x, want 0x%04x", name, got, want)
@@ -172,7 +172,7 @@ func TestNameHashIsCaseInsensitive(t *testing.T) {
 			table[i] = uint16(i - 0x20)
 		}
 	}
-	v := VBR{upcaseTable: table}
+	v := upcaseTable(table)
 
 	if v.nameHash("ReadMe.TXT") != v.nameHash("readme.txt") {
 		t.Error("hash distinguishes case, but the table folds it")

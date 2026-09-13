@@ -121,7 +121,7 @@ func TestDecodeTimestampRejectsImpossibleDates(t *testing.T) {
 // parser reads the UTC offset bytes at 22/23/24 of the file directory entry and
 // ValidDataLength at offset 8 of the stream extension entry.
 func TestParseDirReadsTimestampsAndOffsets(t *testing.T) {
-	exfat := ExFAT{optimistic: true}
+	exfat := newDirParser(&VBR{}, true, false)
 
 	const (
 		dataLength      = uint64(4096)
@@ -162,8 +162,8 @@ func TestParseDirReadsTimestampsAndOffsets(t *testing.T) {
 	clusterdata[name+4] = 'i'
 
 	// The validators bound lengths against the volume geometry.
-	exfat.vbr.nbClusters = 64
-	exfat.vbr.clusterSize = 512
+	exfat.v.nbClusters = 64
+	exfat.v.clusterSize = 512
 
 	entries := exfat.parseDir(clusterdata)
 	if len(entries) != 1 {
@@ -209,9 +209,7 @@ func TestParseDirReadsTimestampsAndOffsets(t *testing.T) {
 // TestDeletedEntriesCarryTimestamps confirms recovered entries get the same
 // treatment, since deleted-entry recovery shares the record parser.
 func TestDeletedEntriesCarryTimestamps(t *testing.T) {
-	exfat := ExFAT{optimistic: true}
-	exfat.vbr.nbClusters = 64
-	exfat.vbr.clusterSize = 512
+	exfat := newDirParser(&VBR{nbClusters: 64, clusterSize: 512}, true, false)
 
 	modified := packTimestamp(2019, 3, 4, 5, 6, 8)
 

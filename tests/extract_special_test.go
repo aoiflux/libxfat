@@ -21,7 +21,7 @@ func findEntry(t *testing.T, entries []libxfat.Entry, name string) libxfat.Entry
 	return libxfat.Entry{}
 }
 
-func openTestVolume(t *testing.T) (libxfat.ExFAT, []libxfat.Entry) {
+func openTestVolume(t *testing.T) (*libxfat.ExFAT, []libxfat.Entry) {
 	t.Helper()
 
 	data := testImageBytes()

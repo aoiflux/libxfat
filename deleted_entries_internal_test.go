@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseDirDetectsDeletedDirectoryEntrySet(t *testing.T) {
-	exfat := ExFAT{optimistic: true}
+	exfat := newDirParser(&VBR{}, true, false)
 
 	clusterdata := make([]byte, EXFAT_DIRRECORD_SIZE*4)
 
@@ -59,7 +59,7 @@ func TestIsDeletedDoesNotUseZeroClusterHeuristic(t *testing.T) {
 }
 
 func TestParseDeletedDirEntriesScansAcrossZeroRecords(t *testing.T) {
-	exfat := ExFAT{optimistic: true}
+	exfat := newDirParser(&VBR{}, true, false)
 
 	clusterdata := make([]byte, EXFAT_DIRRECORD_SIZE*5)
 

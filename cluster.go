@@ -3,8 +3,6 @@ package libxfat
 import (
 	"errors"
 	"fmt"
-	"io"
-	"os"
 )
 
 var errStopClusterWalk = errors.New("stop cluster walk")
@@ -20,57 +18,6 @@ func (v *VBR) isValidCluster(cluster uint32) bool {
 		return false
 	}
 	return uint64(cluster) < uint64(v.nbClusters)+FIRST_CLUSTER_NUMBER
-}
-
-func (v *VBR) readClusters(cluster uint32, nbcluster uint64) ([]byte, error) {
-	if nbcluster == 0 {
-		return []byte{}, nil
-	}
-	if !v.isValidCluster(cluster) {
-		return nil, fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)
-	}
-	clusterIndex := uint64(cluster) - FIRST_CLUSTER_NUMBER
-	if clusterIndex+nbcluster > uint64(v.nbClusters) {
-		return nil, fmt.Errorf("out of range: cluster=%d count=%d", cluster, nbcluster)
-	}
-
-	offset, err := safeInt64(v.getClusterOffset(cluster))
-	if err != nil {
-		return nil, err
-	}
-
-	clusterdata := make([]byte, v.clusterSize*nbcluster)
-	err = v.readAt(clusterdata, offset)
-
-	return clusterdata, err
-}
-
-func (v *VBR) nextCluster(cluster uint32) (uint32, error) {
-	if !v.isValidCluster(cluster) {
-		return 0, fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)
-	}
-
-	fatEntries := (uint64(v.fatSize) * uint64(v.sectorSize)) / 4
-	if uint64(cluster) >= fatEntries {
-		return 0, fmt.Errorf("cluster out of fat: %d", cluster)
-	}
-
-	fatBase, err := safeInt64(v.firstFat)
-	if err != nil {
-		return 0, err
-	}
-	offset := fatBase + (int64(cluster) * 4)
-
-	var data [4]byte
-	if err := v.readAt(data[:], offset); err != nil {
-		return 0, err
-	}
-
-	nextCluster := unpackLELong(data[:]) & EXFAT_CLUSTER_MASK
-	if nextCluster == EXFAT_BAD_CLUSTER {
-		return 0, ErrBadCluster
-	}
-	return nextCluster, nil
 }
 
 func (v *VBR) readClusterInto(cluster uint32, buf []byte) error {
@@ -92,31 +39,21 @@ func (v *VBR) readClusterInto(cluster uint32, buf []byte) error {
 // acquireVisit takes per-walk scratch from the pool, or builds it on first use.
 // The returned state is exclusively the caller's until it is released.
 func (v *VBR) acquireVisit() *visitState {
-	if n := len(v.visitPool); n > 0 {
-		state := v.visitPool[n-1]
-		v.visitPool = v.visitPool[:n-1]
-		return state
+	if v.visitPool != nil {
+		if state, ok := v.visitPool.Get().(*visitState); ok && state != nil {
+			state.reset(v)
+			return state
+		}
 	}
-	return &visitState{buf: make([]byte, v.clusterSize)}
+	return &visitState{}
 }
 
 func (v *VBR) releaseVisit(state *visitState) {
-	// A buffer sized for a different volume geometry is dropped rather than
-	// pooled; readClusterInto would reject it anyway.
-	if uint64(len(state.buf)) == v.clusterSize {
-		v.visitPool = append(v.visitPool, state)
+	if v.visitPool == nil {
+		return
 	}
-}
-
-// loopSet returns the state's loop-detection set, emptied and ready. clear
-// keeps the buckets, which is the point of pooling it.
-func (s *visitState) loopSet() map[uint32]struct{} {
-	if s.seen == nil {
-		s.seen = make(map[uint32]struct{})
-		return s.seen
-	}
-	clear(s.seen)
-	return s.seen
+	state.reset(v)
+	v.visitPool.Put(state)
 }
 
 func (v *VBR) visitContiguousClusters(start uint32, count uint64, visitor func(cluster uint32, data []byte) error) error {
@@ -127,7 +64,7 @@ func (v *VBR) visitContiguousClusters(start uint32, count uint64, visitor func(c
 	state := v.acquireVisit()
 	defer v.releaseVisit(state)
 
-	buf := state.buf
+	buf := state.ensureBuf(v)
 	cluster := start
 	for i := uint64(0); i < count; i++ {
 		if err := v.readClusterInto(cluster, buf); err != nil {
@@ -142,48 +79,41 @@ func (v *VBR) visitContiguousClusters(start uint32, count uint64, visitor func(c
 	return nil
 }
 
+// visitFatChain walks a FAT chain and hands each cluster's data to visitor.
+//
+// It is the data-reading layer over walkChainRuns, which is what keeps loop
+// detection, the cluster-count bound and the end-of-chain test in one place
+// rather than in two implementations that drift. The error contract is
+// unchanged: a chain that loops or breaks fails, rather than returning what it
+// managed to read. Callers that want the recovered prefix instead go through the
+// extent API, which reads the same outcome as flags.
+//
+// The set of clusters the visitor sees before a failure is also unchanged. A
+// cluster is emitted as part of a run before its own FAT entry is read, exactly
+// as the previous implementation visited a cluster before looking up its
+// successor; only the order of the underlying reads differs.
 func (v *VBR) visitFatChain(start uint32, visitor func(cluster uint32, data []byte) error) error {
-	if !v.isValidCluster(start) {
-		return fmt.Errorf("%w: %d", ErrInvalidCluster, start)
-	}
-
 	state := v.acquireVisit()
 	defer v.releaseVisit(state)
 
-	buf := state.buf
-	seen := state.loopSet()
-	cluster := start
-	visited := uint32(0)
-
-	for {
-		if !v.isValidCluster(cluster) {
-			return fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)
-		}
-		if _, ok := seen[cluster]; ok {
-			return ErrClusterChainLoop
-		}
-		seen[cluster] = struct{}{}
-		if visited >= v.nbClusters {
-			return ErrClusterChainLoop
-		}
-
-		if err := v.readClusterInto(cluster, buf); err != nil {
-			return err
-		}
-		if err := visitor(cluster, buf); err != nil {
-			return err
-		}
-
-		nextCluster, err := v.nextCluster(cluster)
-		if err != nil {
-			return err
-		}
-		visited++
-		if nextCluster >= EXFAT_EOF_START && nextCluster <= EXFAT_EOF_END {
+	outcome, err := v.walkChainRuns(start, chainLimits{}, &state.walkScratch,
+		func(run chainRun) error {
+			buf := state.ensureBuf(v)
+			for i := uint32(0); i < run.count; i++ {
+				cluster := run.start + i
+				if err := v.readClusterInto(cluster, buf); err != nil {
+					return err
+				}
+				if err := visitor(cluster, buf); err != nil {
+					return err
+				}
+			}
 			return nil
-		}
-		cluster = nextCluster
+		})
+	if err != nil {
+		return err
 	}
+	return outcome.legacyErr()
 }
 
 func (v *VBR) visitEntryData(entry Entry, visitor func(cluster uint32, data []byte) error) error {
@@ -232,83 +162,6 @@ func (v *VBR) size2Clusters(size uint64) (uint64, uint32) {
 	return sizeInClusters, uint32(remainder)
 }
 
-func (v *VBR) extractEntryContent(entry Entry, dstpath string) error {
-	dstfile, err := os.Create(dstpath)
-	if err != nil {
-		return err
-	}
-	defer dstfile.Close()
-
-	// A zero-length entry yields an empty file. Returning early also keeps
-	// entries with no allocation ($OrphanFiles, empty files, directories with a
-	// zero data length) away from the cluster arithmetic below, where an
-	// entryCluster of 0 would underflow into a nonsense offset.
-	if entry.dataLen == 0 {
-		return nil
-	}
-
-	if entry.isRegion {
-		return v.extractRegion(entry, dstfile)
-	}
-
-	if !entry.noFatChain {
-		return v.extractFatChainedContent(entry, dstfile)
-	}
-
-	return v.extractContiguesContent(entry, dstfile)
-}
-
-// extractRegion copies a fixed byte range of the image, which is how the
-// synthetic $MBR, $FAT1 and $FAT2 entries are backed.
-func (v *VBR) extractRegion(entry Entry, dstfile *os.File) error {
-	length, err := safeInt64(entry.dataLen)
-	if err != nil {
-		return err
-	}
-	offset, err := safeInt64(entry.regionOffset)
-	if err != nil {
-		return err
-	}
-
-	section, err := v.sectionReader(offset, length)
-	if err != nil {
-		return err
-	}
-
-	_, err = io.CopyN(dstfile, section, length)
-	return err
-}
-
-func (v *VBR) extractContiguesContent(entry Entry, dstfile *os.File) error {
-	if !v.isValidCluster(entry.entryCluster) {
-		return fmt.Errorf("%w: %d", ErrInvalidCluster, entry.entryCluster)
-	}
-
-	length, err := safeInt64(entry.dataLen)
-	if err != nil {
-		return err
-	}
-	offset, err := safeInt64(v.getClusterOffset(entry.entryCluster))
-	if err != nil {
-		return err
-	}
-
-	section, err := v.sectionReader(offset, length)
-	if err != nil {
-		return err
-	}
-
-	_, err = io.CopyN(dstfile, section, length)
-	return err
-}
-
-func (v *VBR) extractFatChainedContent(entry Entry, dstfile *os.File) error {
-	return v.visitEntryData(entry, func(_ uint32, chunk []byte) error {
-		_, err := dstfile.Write(chunk)
-		return err
-	})
-}
-
 func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
 	// Region entries ($MBR, $FAT1, $FAT2) are byte ranges outside the cluster
 	// heap. Running them through the arithmetic below derives a cluster number
@@ -348,15 +201,14 @@ func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
 
 	// The tail cluster is read to confirm the mapping actually resolves to
 	// readable data before it is handed out; the bytes themselves are not wanted.
-	// readClusters would allocate a cluster for them and drop it on every call, so
-	// read into pooled scratch instead. For a single cluster the two agree on
-	// every error: isValidCluster already implies the range check readClusters
-	// adds, so nothing here can report differently than it did.
+	// It is the one data read left on this path - walking the chain now touches
+	// only the FAT - and it is kept because a cluster list that cannot be read is
+	// worth failing on here rather than somewhere further from the cause.
 	state := v.acquireVisit()
 	defer v.releaseVisit(state)
 
 	latestCluster := clusterList[len(clusterList)-1]
-	if err = v.readClusterInto(latestCluster, state.buf); err != nil {
+	if err = v.readClusterInto(latestCluster, state.ensureBuf(v)); err != nil {
 		return nil, 0, err
 	}
 
@@ -385,31 +237,49 @@ const maxClusterListSeed = 4096
 func (v *VBR) getChainedClusterList(cluster uint32, sizeHint uint64) ([]uint32, error) {
 	var clusterList []uint32
 	if sizeHint > 0 {
-		// visitFatChain refuses a chain longer than the volume has clusters, so
-		// that is the most a correct result can hold.
+		// A chain longer than the volume has clusters cannot be valid, so that
+		// is the most a correct result can hold.
 		clusterList = make([]uint32, 0, min(sizeHint, uint64(v.nbClusters), maxClusterListSeed))
 	}
 
-	err := v.visitFatChain(cluster, func(cluster uint32, _ []byte) error {
-		clusterList = append(clusterList, cluster)
-		return nil
-	})
+	state := v.acquireVisit()
+	defer v.releaseVisit(state)
+
+	// Only the FAT is read here. The previous implementation went through
+	// visitFatChain, which reads every cluster of the file and handed the data
+	// to a visitor that dropped it - so enumerating a file's clusters read the
+	// whole file, and enumerating a volume's read the whole volume.
+	outcome, err := v.walkChainRuns(cluster, chainLimits{}, &state.walkScratch,
+		func(run chainRun) error {
+			for i := uint32(0); i < run.count; i++ {
+				clusterList = append(clusterList, run.start+i)
+			}
+			return nil
+		})
 	if err != nil {
+		return nil, err
+	}
+	if err := outcome.legacyErr(); err != nil {
 		return nil, err
 	}
 	return clusterList, nil
 }
 
 func (v *VBR) countChainedClusters(cluster uint32) (int, error) {
-	count := 0
-	err := v.visitFatChain(cluster, func(uint32, []byte) error {
-		count++
-		return nil
-	})
+	state := v.acquireVisit()
+	defer v.releaseVisit(state)
+
+	// Counting a chain reads only the FAT; it used to read every byte of the
+	// file to arrive at the same number.
+	outcome, err := v.walkChainRuns(cluster, chainLimits{}, &state.walkScratch,
+		func(chainRun) error { return nil })
 	if err != nil {
 		return -1, err
 	}
-	return count, nil
+	if err := outcome.legacyErr(); err != nil {
+		return -1, err
+	}
+	return int(outcome.clusters), nil
 }
 
 func (v *VBR) countClusters(entry Entry) (int, error) {

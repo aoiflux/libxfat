@@ -153,5 +153,25 @@ var ErrUpcaseTableNotFound = errors.New("up-case table not found")
 
 // ErrNoClusterMapping is returned by GetClusterList for entries that are backed
 // by a fixed byte range rather than by clusters, namely $MBR, $FAT1 and $FAT2.
-// Use Entry.GetRegionOffset to locate those.
+//
+// It is a statement about the cluster API specifically. FragmentOffsets accepts
+// those entries and describes them as the byte ranges they are, which is what a
+// caller comparing a file against image byte ranges actually needs.
 var ErrNoClusterMapping = errors.New("entry is not mapped through clusters")
+
+// ErrTruncatedChain reports that fewer bytes could be located for an entry than
+// its directory record claims. The ranges that were located are returned
+// alongside it: a file found as far as it can be followed is evidence, and
+// discarding it in favour of an error would lose that.
+//
+// It is the expected outcome for a deleted entry, whose chain has been freed.
+var ErrTruncatedChain = errors.New("located fewer bytes than the entry records")
+
+// ErrFragmented is returned when an operation needs a single contiguous run and
+// the entry does not have one.
+var ErrFragmented = errors.New("entry is fragmented")
+
+// ErrNoDataClusters reports an entry that records a non-zero size but a first
+// cluster of 0 or 1, neither of which exists in exFAT. There is nothing to
+// locate, and deriving a cluster from the size would invent one.
+var ErrNoDataClusters = errors.New("entry records a size but no first cluster")

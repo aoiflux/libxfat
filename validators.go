@@ -15,7 +15,7 @@ func entryInUse(b byte) bool { return (b & 0x80) != 0 }
 // validateVolLabelDentry validates a volume label/no-label entry.
 // For label: type masked == 0x03 with in-use bit set, length in [1..15].
 // For no-label: same masked type, in-use bit clear, length == 0 and payload zeros.
-func (e *ExFAT) validateVolLabelDentry(rec []byte) bool {
+func (v *VBR) validateVolLabelDentry(rec []byte) bool {
 	if len(rec) < EXFAT_DIRRECORD_SIZE {
 		return false
 	}
@@ -44,7 +44,7 @@ func (e *ExFAT) validateVolLabelDentry(rec []byte) bool {
 }
 
 // validateAllocBitmapDentry validates the allocation bitmap entry.
-func (e *ExFAT) validateAllocBitmapDentry(rec []byte) bool {
+func (v *VBR) validateAllocBitmapDentry(rec []byte) bool {
 	if len(rec) < EXFAT_DIRRECORD_SIZE {
 		return false
 	}
@@ -58,19 +58,19 @@ func (e *ExFAT) validateAllocBitmapDentry(rec []byte) bool {
 		return false
 	}
 	// Required length is ceil(nbClusters/8)
-	need := (uint64(e.vbr.nbClusters) + 7) / 8
+	need := (uint64(v.nbClusters) + 7) / 8
 	if lengthBytes < need {
 		return false
 	}
 	// Cluster range is [2 .. nbClusters+1]
-	if firstClust < 2 || uint64(firstClust) > uint64(e.vbr.nbClusters)+1 {
+	if firstClust < 2 || uint64(firstClust) > uint64(v.nbClusters)+1 {
 		return false
 	}
 	return true
 }
 
 // validateUpcaseTableDentry validates the upcase table entry.
-func (e *ExFAT) validateUpcaseTableDentry(rec []byte) bool {
+func (v *VBR) validateUpcaseTableDentry(rec []byte) bool {
 	if len(rec) < EXFAT_DIRRECORD_SIZE {
 		return false
 	}
@@ -83,18 +83,18 @@ func (e *ExFAT) validateUpcaseTableDentry(rec []byte) bool {
 		return false
 	}
 	// Must fit within cluster heap
-	heapBytes := uint64(e.vbr.nbClusters) * e.vbr.clusterSize
+	heapBytes := uint64(v.nbClusters) * v.clusterSize
 	if tableSize > heapBytes {
 		return false
 	}
-	if firstClust < 2 || uint64(firstClust) > uint64(e.vbr.nbClusters)+1 {
+	if firstClust < 2 || uint64(firstClust) > uint64(v.nbClusters)+1 {
 		return false
 	}
 	return true
 }
 
 // validateFileDentry does a basic check of FILE entry.
-func (e *ExFAT) validateFileDentry(rec []byte) bool {
+func (v *VBR) validateFileDentry(rec []byte) bool {
 	if len(rec) < EXFAT_DIRRECORD_SIZE {
 		return false
 	}
@@ -109,7 +109,7 @@ func (e *ExFAT) validateFileDentry(rec []byte) bool {
 }
 
 // validateFileStreamDentry checks data length and first cluster are sensible.
-func (e *ExFAT) validateFileStreamDentry(rec []byte) bool {
+func (v *VBR) validateFileStreamDentry(rec []byte) bool {
 	if len(rec) < EXFAT_DIRRECORD_SIZE {
 		return false
 	}
@@ -117,13 +117,13 @@ func (e *ExFAT) validateFileStreamDentry(rec []byte) bool {
 		return false
 	}
 	dataLen := unpackLELongLong(rec[24:32])
-	heapBytes := uint64(e.vbr.nbClusters) * e.vbr.clusterSize
+	heapBytes := uint64(v.nbClusters) * v.clusterSize
 	if dataLen > heapBytes {
 		return false
 	}
 	if dataLen > 0 {
 		firstClust := unpackLELong(rec[20:24])
-		if firstClust < 2 || uint64(firstClust) > uint64(e.vbr.nbClusters)+1 {
+		if firstClust < 2 || uint64(firstClust) > uint64(v.nbClusters)+1 {
 			return false
 		}
 	}
@@ -131,7 +131,7 @@ func (e *ExFAT) validateFileStreamDentry(rec []byte) bool {
 }
 
 // validateFileNameDentry ensures type is a filename entry.
-func (e *ExFAT) validateFileNameDentry(rec []byte) bool {
+func (v *VBR) validateFileNameDentry(rec []byte) bool {
 	if len(rec) < EXFAT_DIRRECORD_SIZE {
 		return false
 	}

@@ -110,7 +110,7 @@ func appendVolumeEntry(entries []listingEntry, label string) []listingEntry {
 	return entries
 }
 
-func collectEntries(exfat libxfat.ExFAT, entries []libxfat.Entry, basePath string) ([]listingEntry, error) {
+func collectEntries(exfat *libxfat.ExFAT, entries []libxfat.Entry, basePath string) ([]listingEntry, error) {
 	var out []listingEntry
 
 	for _, entry := range entries {

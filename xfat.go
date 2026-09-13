@@ -50,10 +50,19 @@
 //
 // # Concurrency
 //
-// Several volumes may share one Reader concurrently, provided the Reader itself
-// is safe for concurrent ReadAt, as *os.File and bytes.Reader are. A single
-// ExFAT value is not safe for concurrent use: directory parsing keeps mutable
-// state on it. Open one per goroutine.
+// An *ExFAT is safe for concurrent use, provided the Reader it was opened over is
+// safe for concurrent ReadAt, as *os.File and bytes.Reader are. Directory parsing
+// keeps its state in a value created per parse rather than on the volume, so two
+// goroutines may read two directories, or two files, of one volume at once.
+//
+// Several volumes may also share one Reader, as they always could.
+//
+// Two things are still single-goroutine, and say so at their own declarations: a
+// *File, which caches its resolved extents and holds a read cursor, and the
+// io.ReadSeeker from File.Reader. File.ReaderAt holds no cursor and is safe.
+//
+// An ExFAT must not be copied - it carries a mutex, so go vet reports any copy.
+// This is why the constructors hand back a pointer.
 package libxfat
 
 import (
@@ -73,11 +82,11 @@ type Source struct {
 	// io.SectionReader over a partition, or any decoded-container reader
 	// (EWF, VHD, ...) that implements io.ReaderAt.
 	//
-	// Because reads no longer move a shared seek cursor, several independently
+	// Because reads do not move a shared seek cursor, several independently
 	// opened volumes may share one Reader concurrently, provided the Reader
 	// itself is safe for concurrent ReadAt (as *os.File and bytes.Reader are).
-	// A single ExFAT value is still not safe for concurrent use: directory
-	// parsing keeps mutable state on it. Open one per goroutine.
+	// One volume may also be read from several goroutines; see the package
+	// documentation on concurrency.
 	Reader io.ReaderAt
 
 	// Size is the length of Reader in bytes. Zero means unknown, which disables
@@ -132,9 +141,9 @@ type Source struct {
 //
 // It is equivalent to Open with Strict set to !optimistic and Base set to
 // offset*512, and is retained unchanged for compatibility.
-func New(imagefile *os.File, optimistic bool, offset ...uint64) (ExFAT, error) {
+func New(imagefile *os.File, optimistic bool, offset ...uint64) (*ExFAT, error) {
 	if imagefile == nil {
-		return ExFAT{}, ErrNilReader
+		return nil, ErrNilReader
 	}
 
 	// A failed Stat only costs us bounds checking, so it is not fatal: raw
@@ -159,14 +168,14 @@ func New(imagefile *os.File, optimistic bool, offset ...uint64) (ExFAT, error) {
 // the partition then offset is 0 while the volume still records its true LBA,
 // and the two will not agree; use Open with PartitionLBA or
 // IgnorePartitionOffset for that case.
-func NewFromReaderAt(r io.ReaderAt, size int64, optimistic bool, offset ...uint64) (ExFAT, error) {
+func NewFromReaderAt(r io.ReaderAt, size int64, optimistic bool, offset ...uint64) (*ExFAT, error) {
 	if len(offset) < 1 {
 		offset = append(offset, 0)
 	}
 
 	base, err := safeInt64(offset[0] * SECTOR_SIZE)
 	if err != nil {
-		return ExFAT{}, err
+		return nil, err
 	}
 
 	return open(Source{
@@ -185,13 +194,15 @@ func Open(src Source) (*ExFAT, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &fs, nil
+	return fs, nil
 }
 
-// open is the single real constructor. It returns the partially populated
-// value alongside any error, matching what New has always done.
-func open(src Source) (ExFAT, error) {
-	var exfatdata ExFAT
+// open is the single real constructor. It returns the partially populated volume
+// alongside any error, matching what New has always done - the pointer is non-nil
+// even on failure, so a caller inspecting what was parsed before the error still
+// can.
+func open(src Source) (*ExFAT, error) {
+	exfatdata := &ExFAT{}
 
 	if src.Reader == nil {
 		return exfatdata, ErrNilReader

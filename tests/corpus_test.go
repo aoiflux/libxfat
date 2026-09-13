@@ -99,7 +99,7 @@ func findVolumeBase(r io.ReaderAt, size int64) (int64, bool) {
 
 // openCorpusImage opens an image the way a consumer would, preferring strict
 // mode and recording which settings the volume actually needed.
-func openCorpusImage(t *testing.T, path string) (libxfat.ExFAT, int64, bool) {
+func openCorpusImage(t *testing.T, path string) (*libxfat.ExFAT, int64, bool) {
 	t.Helper()
 
 	file, err := os.Open(path)
@@ -118,7 +118,7 @@ func openCorpusImage(t *testing.T, path string) (libxfat.ExFAT, int64, bool) {
 	if !found {
 		t.Logf("%s: no exFAT volume boot record found in the first %d bytes; skipping",
 			filepath.Base(path), corpusSignatureScanSpan)
-		return libxfat.ExFAT{}, 0, false
+		return nil, 0, false
 	}
 
 	// Strict, with the offset derived from where the signature actually is.
@@ -130,7 +130,7 @@ func openCorpusImage(t *testing.T, path string) (libxfat.ExFAT, int64, bool) {
 	})
 	if err == nil {
 		t.Logf("%s: opened strict at byte %d", filepath.Base(path), base)
-		return *fs, size, true
+		return fs, size, true
 	}
 
 	// A PartitionOffset disagreement is common and benign: plenty of tools write
@@ -145,12 +145,12 @@ func openCorpusImage(t *testing.T, path string) (libxfat.ExFAT, int64, bool) {
 		})
 		if err == nil {
 			t.Logf("%s: opened strict at byte %d (PartitionOffset ignored)", filepath.Base(path), base)
-			return *fs, size, true
+			return fs, size, true
 		}
 	}
 
 	t.Errorf("%s: could not open at byte %d: %v", filepath.Base(path), base, err)
-	return libxfat.ExFAT{}, 0, false
+	return nil, 0, false
 }
 
 // TestCorpusWalk parses every image in the corpus and checks the invariants a
@@ -496,7 +496,7 @@ func TestCorpusNameHashes(t *testing.T) {
 
 // openCorpusImageOptimistic opens the same volume with verification off, so a
 // test can compare the two readings of one image.
-func openCorpusImageOptimistic(t *testing.T, path string) (libxfat.ExFAT, bool) {
+func openCorpusImageOptimistic(t *testing.T, path string) (*libxfat.ExFAT, bool) {
 	t.Helper()
 
 	file, err := os.Open(path)
@@ -512,15 +512,15 @@ func openCorpusImageOptimistic(t *testing.T, path string) (libxfat.ExFAT, bool) 
 
 	base, found := findVolumeBase(file, info.Size())
 	if !found {
-		return libxfat.ExFAT{}, false
+		return nil, false
 	}
 
 	fs, err := libxfat.Open(libxfat.Source{Reader: file, Size: info.Size(), Base: base})
 	if err != nil {
 		t.Errorf("%s: optimistic open at byte %d: %v", filepath.Base(path), base, err)
-		return libxfat.ExFAT{}, false
+		return nil, false
 	}
-	return *fs, true
+	return fs, true
 }
 
 // TestCorpusStrictMatchesOptimistic is a standing differential invariant:
@@ -561,8 +561,8 @@ func TestCorpusStrictMatchesOptimistic(t *testing.T) {
 				return out
 			}
 
-			strict := names(&strictFS)
-			optimistic := names(&optimisticFS)
+			strict := names(strictFS)
+			optimistic := names(optimisticFS)
 
 			if len(strict) != len(optimistic) {
 				t.Fatalf("strict found %d entries, optimistic %d", len(strict), len(optimistic))
