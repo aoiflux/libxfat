@@ -43,6 +43,22 @@ type VBR struct {
 	// unit. It is loaded on demand because only name hashing needs it. Units at
 	// or past its end map to themselves.
 	upcaseTable []uint16
+	// visitPool holds the per-walk scratch a cluster walk needs, so a tree walk
+	// does not allocate a read buffer and a loop-detection set for every
+	// directory it descends into.
+	visitPool []*visitState
+}
+
+// visitState is the scratch one cluster walk needs: a cluster-sized read buffer
+// and the set that detects a chain looping back on itself.
+//
+// These are pooled rather than held as single shared fields on VBR. Nothing
+// nests a walk inside another today - every visitor is internal and none reads
+// - but a shared buffer would corrupt the outer walk silently if one ever did,
+// and the cost of a free list is the same.
+type visitState struct {
+	buf  []byte
+	seen map[uint32]struct{}
 }
 
 type Entry struct {
@@ -63,7 +79,6 @@ type Entry struct {
 	entryAttr         uint16
 	noFatChain        bool
 	name              string
-	seenRecords       []byte
 	secondaryCount    uint32
 	nameLen           byte
 	readNameLen       uint32
@@ -286,6 +301,10 @@ type ExFAT struct {
 	expectedSC       int
 	expectedNameLen  int
 	nameUnits        []uint16
+	// nameBytes is scratch for decoding nameUnits to UTF-8. Neither buffer is
+	// ever handed out: the name a caller receives is a string copied out of
+	// this one, so reuse cannot be observed.
+	nameBytes []byte
 	// setInUse is the allocation state of the primary record that opened the
 	// current set. Secondary records must agree with it, otherwise a deleted
 	// record is being folded into an allocated set or vice versa.

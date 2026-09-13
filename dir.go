@@ -33,7 +33,9 @@ func (e *ExFAT) resetSetAssembly() {
 	e.expectedChecksum = 0
 	e.expectedSC = 0
 	e.expectedNameLen = 0
-	e.nameUnits = nil
+	// Truncated rather than dropped: the parser owns this buffer, never hands
+	// it out, and reassembles a name into it for every entry set on the volume.
+	e.nameUnits = e.nameUnits[:0]
 	e.setInUse = false
 	e.sawStream = false
 }
@@ -81,7 +83,10 @@ func (e *ExFAT) finishEntrySet(entries *[]Entry) {
 	checked := !e.optimistic
 	verified := e.expectedChecksum == e.setChecksum
 
-	name := utf16UnitsToString(e.nameUnits)
+	// Decoded through a buffer the parser owns, so the name costs the one
+	// allocation the caller keeps and nothing else.
+	e.nameBytes = appendUTF16AsUTF8(e.nameBytes[:0], dropNULs(e.nameUnits))
+	name := string(e.nameBytes)
 	e.entry.rawName = name
 
 	// A set whose name records are empty or all NUL leaves nothing to call the
@@ -206,6 +211,13 @@ func (e *ExFAT) GetFullPathIndexableEntries(entries []Entry, path string) ([]Ent
 
 		if indexable {
 			retentries = append(retentries, entry)
+		}
+
+		// Composing the child prefix costs a string, so it is built only when
+		// there are children to hand it to. Most entries on a volume are files,
+		// and every one of them was paying for a prefix nothing ever read.
+		if len(subentries) == 0 {
+			continue
 		}
 
 		tempRet, err := e.GetFullPathIndexableEntries(subentries, entry.name+"/")
@@ -347,12 +359,23 @@ func (e *ExFAT) RecoverDeletedEntries() ([]Entry, error) {
 	}
 
 	var deleted []Entry
+
+	// One buffer for the whole scan rather than one per cluster. This loop runs
+	// over every unallocated cluster on the volume, so allocating here meant a
+	// cluster-sized allocation per free cluster - on a mostly-empty volume, the
+	// bulk of what this call costs.
+	//
+	// Reuse is safe because nothing in an Entry points back at the cluster
+	// data: the names are freshly allocated strings and every other field is a
+	// scalar copied out of the record.
+	state := e.vbr.acquireVisit()
+	defer e.vbr.releaseVisit(state)
+
 	for _, cluster := range unallocated {
-		clusterdata, err := e.vbr.readClusters(cluster, 1)
-		if err != nil {
+		if err := e.vbr.readClusterInto(cluster, state.buf); err != nil {
 			return nil, err
 		}
-		deleted = append(deleted, e.parseDeletedDirEntries(clusterdata)...)
+		deleted = append(deleted, e.parseDeletedDirEntries(state.buf)...)
 	}
 
 	return deleted, nil
@@ -493,7 +516,7 @@ func (e *ExFAT) parseDeletedDirEntries(clusterdata []byte) []Entry {
 			}
 
 			e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec.data, false)
-			e.nameUnits = append(e.nameUnits, utf16leUnitsFromBytes(rec.bytes(2, EXFAT_DIRRECORD_SIZE), 15)...)
+			e.nameUnits = appendUTF16LEUnits(e.nameUnits, rec.bytes(2, EXFAT_DIRRECORD_SIZE), 15)
 
 			if e.remainingSC < 1 {
 				continue
@@ -586,8 +609,7 @@ func (e *ExFAT) parseDirChunk(clusterdata []byte, entries *[]Entry) bool {
 					e.setChecksum = exfatDirSetChecksumAdd(e.setChecksum, rec.data, false)
 
 					raw := rec.bytes(2, EXFAT_DIRRECORD_SIZE)
-					units := utf16leUnitsFromBytes(raw, 15)
-					e.nameUnits = append(e.nameUnits, units...)
+					e.nameUnits = appendUTF16LEUnits(e.nameUnits, raw, 15)
 
 					if e.remainingSC >= 1 {
 						e.remainingSC--
@@ -659,7 +681,6 @@ func (e *ExFAT) populateRecordBitmapUpcase(rec dirRecordView) {
 }
 func (e *ExFAT) populateDirRecordDel(rec dirRecordView) {
 	e.entry.etype = e.dirtype
-	e.entry.seenRecords = []byte{e.dirtype}
 	e.entry.secondaryCount = uint32(rec.byteAt(1))
 	e.entry.entryAttr = rec.le16(4)
 	e.entry.created = rec.le32(8)

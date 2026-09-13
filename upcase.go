@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"unicode"
 	"unicode/utf16"
 )
 
@@ -110,14 +111,29 @@ func (v *VBR) upcaseUnit(unit uint16) uint16 {
 // nameHash is the NameHash routine from section 7.7.3 of the exFAT
 // specification: a 16-bit rotate-and-add over the up-cased name's UTF-16LE
 // bytes.
+// It walks the string's runes directly rather than converting to []rune and
+// then to []uint16, which allocated twice per name checked.
 func (v *VBR) nameHash(name string) uint16 {
 	var hash uint16
-	for _, unit := range utf16.Encode([]rune(name)) {
-		unit = v.upcaseUnit(unit)
-		hash = ((hash << 15) | (hash >> 1)) + uint16(byte(unit))
-		hash = ((hash << 15) | (hash >> 1)) + uint16(byte(unit>>8))
+	for _, r := range name {
+		// EncodeRune reports the pair as U+FFFD twice when the rune needs no
+		// surrogates, which is every character in the BMP.
+		high, low := utf16.EncodeRune(r)
+		if high == unicode.ReplacementChar && low == unicode.ReplacementChar {
+			hash = v.hashUnit(hash, uint16(r))
+			continue
+		}
+		hash = v.hashUnit(hash, uint16(high))
+		hash = v.hashUnit(hash, uint16(low))
 	}
 	return hash
+}
+
+// hashUnit folds one code unit into the running hash, up-casing it first.
+func (v *VBR) hashUnit(hash, unit uint16) uint16 {
+	unit = v.upcaseUnit(unit)
+	hash = ((hash << 15) | (hash >> 1)) + uint16(byte(unit))
+	return ((hash << 15) | (hash >> 1)) + uint16(byte(unit>>8))
 }
 
 // UpcaseString folds a string through the volume's own up-case table. It is what

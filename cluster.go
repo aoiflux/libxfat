@@ -89,12 +89,45 @@ func (v *VBR) readClusterInto(cluster uint32, buf []byte) error {
 	return v.readAt(buf, offset)
 }
 
+// acquireVisit takes per-walk scratch from the pool, or builds it on first use.
+// The returned state is exclusively the caller's until it is released.
+func (v *VBR) acquireVisit() *visitState {
+	if n := len(v.visitPool); n > 0 {
+		state := v.visitPool[n-1]
+		v.visitPool = v.visitPool[:n-1]
+		return state
+	}
+	return &visitState{buf: make([]byte, v.clusterSize)}
+}
+
+func (v *VBR) releaseVisit(state *visitState) {
+	// A buffer sized for a different volume geometry is dropped rather than
+	// pooled; readClusterInto would reject it anyway.
+	if uint64(len(state.buf)) == v.clusterSize {
+		v.visitPool = append(v.visitPool, state)
+	}
+}
+
+// loopSet returns the state's loop-detection set, emptied and ready. clear
+// keeps the buckets, which is the point of pooling it.
+func (s *visitState) loopSet() map[uint32]struct{} {
+	if s.seen == nil {
+		s.seen = make(map[uint32]struct{})
+		return s.seen
+	}
+	clear(s.seen)
+	return s.seen
+}
+
 func (v *VBR) visitContiguousClusters(start uint32, count uint64, visitor func(cluster uint32, data []byte) error) error {
 	if count == 0 {
 		return nil
 	}
 
-	buf := make([]byte, v.clusterSize)
+	state := v.acquireVisit()
+	defer v.releaseVisit(state)
+
+	buf := state.buf
 	cluster := start
 	for i := uint64(0); i < count; i++ {
 		if err := v.readClusterInto(cluster, buf); err != nil {
@@ -114,8 +147,11 @@ func (v *VBR) visitFatChain(start uint32, visitor func(cluster uint32, data []by
 		return fmt.Errorf("%w: %d", ErrInvalidCluster, start)
 	}
 
-	buf := make([]byte, v.clusterSize)
-	seen := make(map[uint32]struct{})
+	state := v.acquireVisit()
+	defer v.releaseVisit(state)
+
+	buf := state.buf
+	seen := state.loopSet()
 	cluster := start
 	visited := uint32(0)
 

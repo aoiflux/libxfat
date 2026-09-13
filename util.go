@@ -2,7 +2,9 @@ package libxfat
 
 import (
 	"fmt"
+	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 func IsEntryTypeValidRecord(etype byte) bool {
@@ -70,7 +72,7 @@ func unicodeFromAscii(raw []byte, unicodeCharCount int) string {
 	// corresponds to the number of Unicode characters. The character-count may
 	// still include trailing NULs, so we intentionally skip over those.
 
-	decodedString := make([]rune, 0)
+	decodedString := make([]rune, 0, unicodeCharCount)
 	for i := 0; i < unicodeCharCount; i++ {
 		wchar1 := uint16(raw[i*2+1])
 		wchar2 := uint16(raw[i*2])
@@ -114,20 +116,22 @@ func exfatDirSetChecksumAdd(accum uint16, record []byte, isFileDir bool) uint16 
 	return accum
 }
 
-// utf16leUnitsFromBytes converts raw little-endian bytes to UTF-16 code units.
-// It reads up to maxUnits units. If maxUnits <= 0, it decodes all available pairs.
-func utf16leUnitsFromBytes(raw []byte, maxUnits int) []uint16 {
+// appendUTF16LEUnits decodes raw little-endian bytes into dst as UTF-16 code
+// units, reading up to maxUnits of them, or all available pairs when maxUnits
+// is not positive.
+//
+// Appending into a caller-owned buffer matters here: this runs once per name
+// record, and returning a fresh slice meant an allocation per record that was
+// copied into the name buffer and immediately dropped.
+func appendUTF16LEUnits(dst []uint16, raw []byte, maxUnits int) []uint16 {
 	nPairs := len(raw) / 2
 	if maxUnits > 0 && nPairs > maxUnits {
 		nPairs = maxUnits
 	}
-	units := make([]uint16, 0, nPairs)
 	for i := 0; i < nPairs; i++ {
-		lo := uint16(raw[i*2])
-		hi := uint16(raw[i*2+1])
-		units = append(units, lo|(hi<<8))
+		dst = append(dst, uint16(raw[i*2])|uint16(raw[i*2+1])<<8)
 	}
-	return units
+	return dst
 }
 
 // unnamedEntryName builds the placeholder for an entry that carries no name on
@@ -140,21 +144,47 @@ func unnamedEntryName(cluster uint32) string {
 	return fmt.Sprintf("%s-%d", UNNAMED, cluster)
 }
 
-// utf16UnitsToString decodes UTF-16 code units to a UTF-8 string, skipping NULs.
-func utf16UnitsToString(units []uint16) string {
-	if len(units) == 0 {
-		return ""
-	}
-	// Filter zero code units (trailing NULs)
+// dropNULs compacts units in place, removing the zero code units that pad a
+// name record out to its fixed width.
+func dropNULs(units []uint16) []uint16 {
 	filtered := units[:0]
 	for _, u := range units {
 		if u != 0 {
 			filtered = append(filtered, u)
 		}
 	}
-	runes := utf16.Decode(filtered)
-	return string(runes)
+	return filtered
 }
+
+// appendUTF16AsUTF8 decodes UTF-16 code units into dst as UTF-8, matching
+// utf16.Decode's treatment of unpaired surrogates.
+//
+// It exists to avoid the intermediate []rune that utf16.Decode allocates: every
+// name on the volume passed through a rune slice on its way to a string, so a
+// name cost two allocations where only one is unavoidable.
+func appendUTF16AsUTF8(dst []byte, units []uint16) []byte {
+	const (
+		surr1 = 0xd800
+		surr2 = 0xdc00
+		surr3 = 0xe000
+	)
+
+	for i := 0; i < len(units); i++ {
+		unit := units[i]
+		switch {
+		case unit < surr1, surr3 <= unit:
+			dst = utf8.AppendRune(dst, rune(unit))
+		case unit < surr2 && i+1 < len(units) &&
+			surr2 <= units[i+1] && units[i+1] < surr3:
+			dst = utf8.AppendRune(dst, utf16.DecodeRune(rune(unit), rune(units[i+1])))
+			i++
+		default:
+			dst = utf8.AppendRune(dst, unicode.ReplacementChar)
+		}
+	}
+	return dst
+}
+
 
 func getFileAttributes(attr uint16) string {
 	const char = '-'
@@ -198,7 +228,7 @@ func humanize(b uint64) string {
 }
 
 func getRange(index uint32, count uint64) []uint32 {
-	var list []uint32
+	list := make([]uint32, 0, count)
 	for count != 0 {
 		list = append(list, index)
 		count--
