@@ -171,17 +171,17 @@ func TestParseDirReadsTimestampsAndOffsets(t *testing.T) {
 	}
 	entry := entries[0]
 
-	if got, want := entry.GetName(), "Hi"; got != want {
-		t.Fatalf("GetName() = %q, want %q", got, want)
+	if got, want := entry.Name(), "Hi"; got != want {
+		t.Fatalf("Name() = %q, want %q", got, want)
 	}
-	if got := entry.GetSize(); got != dataLength {
-		t.Fatalf("GetSize() = %d, want %d", got, dataLength)
+	if got := entry.Size(); got != dataLength {
+		t.Fatalf("Size() = %d, want %d", got, dataLength)
 	}
-	if got := entry.GetValidDataSize(); got != validDataLength {
-		t.Fatalf("GetValidDataSize() = %d, want %d", got, validDataLength)
+	if got := entry.ValidDataSize(); got != validDataLength {
+		t.Fatalf("ValidDataSize() = %d, want %d", got, validDataLength)
 	}
 
-	ts := entry.GetTimestamps()
+	ts := entry.Timestamps()
 	if !ts.CreatedOffsetValid || !ts.ModifiedOffsetValid || !ts.AccessedOffsetValid {
 		t.Fatalf("offset validity = (%v, %v, %v), want all true",
 			ts.CreatedOffsetValid, ts.ModifiedOffsetValid, ts.AccessedOffsetValid)
@@ -189,20 +189,20 @@ func TestParseDirReadsTimestampsAndOffsets(t *testing.T) {
 
 	// 2020-01-02 03:04:06 +1.00s at UTC-08:00 -> 11:04:07 UTC
 	wantCreated := time.Date(2020, 1, 2, 11, 4, 7, 0, time.UTC)
-	if !entry.GetCreatedTime().Equal(wantCreated) {
-		t.Fatalf("GetCreatedTime() = %v, want %v", entry.GetCreatedTime(), wantCreated)
+	if !entry.CreatedTime().Equal(wantCreated) {
+		t.Fatalf("CreatedTime() = %v, want %v", entry.CreatedTime(), wantCreated)
 	}
 
 	// 2021-06-07 08:09:10 +0.50s at UTC+02:00 -> 06:09:10.5 UTC
 	wantModified := time.Date(2021, 6, 7, 6, 9, 10, 500*int(time.Millisecond), time.UTC)
-	if !entry.GetModifiedTime().Equal(wantModified) {
-		t.Fatalf("GetModifiedTime() = %v, want %v", entry.GetModifiedTime(), wantModified)
+	if !entry.ModifiedTime().Equal(wantModified) {
+		t.Fatalf("ModifiedTime() = %v, want %v", entry.ModifiedTime(), wantModified)
 	}
 
 	// Access has no sub-second field and this one is recorded at UTC+00:00.
 	wantAccessed := time.Date(2022, 11, 12, 13, 14, 16, 0, time.UTC)
-	if !entry.GetAccessedTime().Equal(wantAccessed) {
-		t.Fatalf("GetAccessedTime() = %v, want %v", entry.GetAccessedTime(), wantAccessed)
+	if !entry.AccessedTime().Equal(wantAccessed) {
+		t.Fatalf("AccessedTime() = %v, want %v", entry.AccessedTime(), wantAccessed)
 	}
 }
 
@@ -227,13 +227,13 @@ func TestDeletedEntriesCarryTimestamps(t *testing.T) {
 	clusterdata[name] = EXFAT_DIRRECORD_DEL_FILENAME_EXT
 	clusterdata[name+2] = 'X'
 
-	entries := exfat.parseDeletedDirEntries(clusterdata)
+	entries := exfat.parseDeletedDirEntries(unlocatedChunk, clusterdata)
 	if len(entries) != 1 {
 		t.Fatalf("parseDeletedDirEntries() entries = %d, want 1", len(entries))
 	}
 
 	want := time.Date(2019, 3, 4, 4, 6, 8, 0, time.UTC)
-	if got := entries[0].GetModifiedTime(); !got.Equal(want) {
-		t.Fatalf("GetModifiedTime() = %v, want %v", got, want)
+	if got := entries[0].ModifiedTime(); !got.Equal(want) {
+		t.Fatalf("ModifiedTime() = %v, want %v", got, want)
 	}
 }

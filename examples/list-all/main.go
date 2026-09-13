@@ -8,7 +8,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 type listingEntry struct {
@@ -49,7 +49,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("walk filesystem: %v", err)
 	}
-	entries = appendVolumeEntry(entries, exfat.GetVolumeLabel())
+	volumeLabel, err := exfat.VolumeLabel()
+	if err != nil {
+		log.Fatalf("read volume label: %v", err)
+	}
+	entries = appendVolumeEntry(entries, volumeLabel)
 
 	for _, entry := range entries {
 		fmt.Printf("%-10s %-28s %10d %s\n", entry.typeName, entry.marks, entry.size, entry.fullPath)
@@ -70,7 +74,7 @@ func entryType(entry libxfat.Entry) string {
 }
 
 func isVolumeEntry(entry libxfat.Entry) bool {
-	return strings.Contains(strings.ToLower(entry.GetName()), "volume")
+	return strings.Contains(strings.ToLower(entry.Name()), "volume")
 }
 
 func entryMarks(entry libxfat.Entry) string {
@@ -114,7 +118,7 @@ func collectEntries(exfat *libxfat.ExFAT, entries []libxfat.Entry, basePath stri
 	var out []listingEntry
 
 	for _, entry := range entries {
-		name := entry.GetName()
+		name := entry.Name()
 		if strings.TrimSpace(name) == "" {
 			name = "<no-name>"
 		}
@@ -126,7 +130,7 @@ func collectEntries(exfat *libxfat.ExFAT, entries []libxfat.Entry, basePath stri
 		out = append(out, listingEntry{
 			typeName: entryType(entry),
 			marks:    entryMarks(entry),
-			size:     entry.GetSize(),
+			size:     entry.Size(),
 			fullPath: fullPath,
 		})
 

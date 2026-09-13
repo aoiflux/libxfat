@@ -8,17 +8,22 @@ import (
 )
 
 type VBR struct {
-	signature         string
-	vbrOffset         uint64
-	volumeSize        uint64
-	fatOffset         uint32
-	fatSize           uint32
-	numberOfFats      byte
-	dataRegionOffset  uint32
-	nbClusters        uint32
-	rootDirCluster    uint32
-	sn                []byte
-	version           uint16
+	signature        string
+	vbrOffset        uint64
+	volumeSize       uint64
+	fatOffset        uint32
+	fatSize          uint32
+	numberOfFats     byte
+	dataRegionOffset uint32
+	nbClusters       uint32
+	rootDirCluster   uint32
+	// serialNumber is VolumeSerialNumber, decoded and copied. It used to be a
+	// four-byte slice into the parse buffer, which kept all twelve sectors of it
+	// alive for the life of the volume to hold a number that nothing read.
+	serialNumber uint32
+	version      uint16
+	// volumeFlags is the VolumeFlags field; see the VOLUME_FLAG_ constants.
+	volumeFlags       uint16
 	sectorSize        uint32
 	sectorsPerCluster uint32
 	clusterSize       uint64
@@ -28,7 +33,7 @@ type VBR struct {
 	dimage            io.ReaderAt
 	// base is the absolute byte offset within dimage at which the volume (its
 	// volume boot record) begins. Every absolute offset the library computes -
-	// including the values returned by GetClusterOffset - is relative to the
+	// including the values returned by ClusterOffset - is relative to the
 	// start of dimage, not to the start of the volume.
 	base int64
 	// size is the length of dimage in bytes, or 0 when it is not known.
@@ -36,6 +41,11 @@ type VBR struct {
 	volumeLabel string
 	bitmapEntry Entry
 	upcaseEntry Entry
+	// rootParsed records that a root directory parse has published its findings.
+	// Without it an empty volumeLabel is ambiguous between a volume with no label
+	// and a volume whose root has not been read.
+	rootParsed bool
+
 	// upcaseTable is the volume's up-case table, decompressed, indexed by code
 	// unit. It is loaded on demand because only name hashing needs it. Units at
 	// or past its end map to themselves.
@@ -108,6 +118,12 @@ type Entry struct {
 	validDataLen uint64
 	// regionOffset is the byte offset of a synthetic region entry; see isRegion.
 	regionOffset uint64
+	// entrySetOffset is the absolute image offset of the entry set's primary
+	// record - the physical address of this entry's own directory record. It is
+	// zero for an entry whose parse was not told where its bytes came from, and
+	// for the synthetic region entries, which have no record on disk.
+	// EntrySetOffset says which.
+	entrySetOffset int64
 
 	name string
 	// rawName is the name exactly as decoded from the name records, before any
@@ -121,7 +137,12 @@ type Entry struct {
 	created        uint32
 	accessed       uint32
 	secondaryCount uint32
-	readNameLen    uint32
+	// parentFirstCluster is the first cluster of the directory this entry was
+	// read from, and entrySlotIndex is the position of its primary record within
+	// that directory, counted in 32-byte slots from the directory's start.
+	// Together they are the entry's composite identity; see FileID.
+	parentFirstCluster uint32
+	entrySlotIndex     uint32
 
 	entryAttr uint16
 	// expectedSetChecksum and computedSetChecksum are the entry set checksum as
@@ -186,11 +207,11 @@ func (e Entry) IsRegion() bool {
 	return e.isRegion
 }
 
-// GetRegionOffset returns the absolute byte offset of a region entry within the
+// RegionOffset returns the absolute byte offset of a region entry within the
 // image, and whether the entry is a region at all. Region entries lie outside
-// the cluster heap, so GetClusterList cannot describe them; this together with
-// GetSize gives their full extent.
-func (e Entry) GetRegionOffset() (uint64, bool) {
+// the cluster heap, so ClusterList cannot describe them; this together with
+// Size gives their full extent.
+func (e Entry) RegionOffset() (uint64, bool) {
 	return e.regionOffset, e.isRegion
 }
 
@@ -202,25 +223,25 @@ func (e Entry) IsMetadataStream() bool {
 		uint64(e.entryCluster) >= FIRST_CLUSTER_NUMBER
 }
 
-// GetEntryType returns the raw exFAT directory entry type byte, for example
+// EntryType returns the raw exFAT directory entry type byte, for example
 // 0x85 for an allocated file entry, 0x05 for a deleted one, or 0x81/0x82 for
 // the allocation bitmap and up-case table. Synthetic entries report 0xFF.
-func (e Entry) GetEntryType() byte {
+func (e Entry) EntryType() byte {
 	return e.etype
 }
 
-// GetAttributes returns the raw exFAT file attribute bits. Compare against the
+// Attributes returns the raw exFAT file attribute bits. Compare against the
 // ENTRY_ATTR_* masks.
-func (e Entry) GetAttributes() uint16 {
+func (e Entry) Attributes() uint16 {
 	return e.entryAttr
 }
 
-// GetValidDataSize returns the entry's valid data length in bytes: how much of
-// the allocated stream was actually written. Bytes between this and GetSize are
+// ValidDataSize returns the entry's valid data length in bytes: how much of
+// the allocated stream was actually written. Bytes between this and Size are
 // allocated but never written, and may retain earlier content.
 //
-// Prefer this to GetValidDataLen, which returns a human-readable string.
-func (e Entry) GetValidDataSize() uint64 {
+// Prefer this to reading the raw stream extension: it is already decoded.
+func (e Entry) ValidDataSize() uint64 {
 	return e.validDataLen
 }
 
@@ -259,7 +280,7 @@ func (e Entry) EntrySetChecksums() (expected, computed uint16, checked bool) {
 	return e.expectedSetChecksum, e.computedSetChecksum, e.nameChecksumChecked
 }
 
-// HasSyntheticName reports whether GetName returns a placeholder the library
+// HasSyntheticName reports whether Name returns a placeholder the library
 // supplied rather than a name read off the volume. It is set when an entry set's
 // name records carry no usable characters at all.
 //
@@ -279,17 +300,17 @@ func (e Entry) RecordedNameHash() (uint16, bool) {
 	return e.nameHash, e.etype == EXFAT_DIRRECORD_FILEDIR && !e.IsSpecialFile()
 }
 
-// GetRawName returns the name exactly as recorded on the volume, without the
+// RawName returns the name exactly as recorded on the volume, without the
 // deleted marker, the placeholder given to a nameless entry, or any path a
-// caller has composed onto GetName.
-func (e Entry) GetRawName() string {
+// caller has composed onto Name.
+func (e Entry) RawName() string {
 	return e.rawName
 }
 
-func (e Entry) GetNameLength() byte {
+func (e Entry) NameLength() byte {
 	return e.nameLen
 }
-func (e Entry) GetName() string {
+func (e Entry) Name() string {
 	return e.name
 }
 func (e Entry) IsFile() bool {
@@ -298,19 +319,32 @@ func (e Entry) IsFile() bool {
 func (e Entry) IsDir() bool {
 	return e.entryAttr&ENTRY_ATTR_DIR_MASK > 0
 }
-func (e Entry) GetEntryCluster() uint32 {
+func (e Entry) FirstCluster() uint32 {
 	return e.entryCluster
 }
-func (e Entry) GetSize() uint64 {
+func (e Entry) Size() uint64 {
 	return e.dataLen
 }
-func (e Entry) DoesNotHaveFatChain() bool {
+
+// IsContiguous reports whether the entry's stream extension set the NoFatChain
+// flag, meaning the volume states the stream occupies consecutive clusters and its
+// FAT entries are undefined.
+//
+// It replaces DoesNotHaveFatChain and HasFatChain, which were inverses of each
+// other. If you are migrating, check the sense: IsContiguous is the old
+// DoesNotHaveFatChain, and the old HasFatChain is !IsContiguous.
+//
+// It says what the volume recorded, not what the library verified. FragmentResult's
+// NoFatChain field carries the same fact alongside the runs actually located.
+func (e Entry) IsContiguous() bool {
 	return e.noFatChain
 }
-func (e Entry) HasFatChain() bool {
-	return !e.noFatChain
-}
-func (e Entry) IsIndexed() bool {
+
+// IsInUse reports whether the entry set's primary record carries the InUse bit -
+// that is, whether the entry describes a file the volume still lists. It is the
+// negation of IsDeleted, and was called IsIndexed, which said nothing about what it
+// tested.
+func (e Entry) IsInUse() bool {
 	return !e.IsDeleted()
 }
 func (e Entry) IsDeleted() bool {
@@ -350,6 +384,14 @@ type ExFAT struct {
 	//
 	// One mutex covers all of them because one parse discovers them together.
 	metaMu sync.RWMutex
+}
+
+// rootHasBeenParsed reports whether a root directory parse has published its
+// findings, which is what makes an empty volume label meaningful.
+func (e *ExFAT) rootHasBeenParsed() bool {
+	e.metaMu.RLock()
+	defer e.metaMu.RUnlock()
+	return e.vbr.rootParsed
 }
 
 // volumeMetaKnown reports whether a usable $BitMap entry has been published.
@@ -405,6 +447,11 @@ func (e *ExFAT) publish(out parseOutputs) {
 	e.metaMu.Lock()
 	defer e.metaMu.Unlock()
 
+	// Recorded whether or not anything was found, because "the root has been read
+	// and it carries no label" and "the root has not been read" are different
+	// answers and an empty string cannot tell them apart.
+	e.vbr.rootParsed = true
+
 	if out.sawLabel {
 		e.vbr.volumeLabel = out.volumeLabel
 	}
@@ -422,7 +469,10 @@ func (e *ExFAT) publish(out parseOutputs) {
 	}
 }
 
-func (e *ExFAT) GetVolumeLabel() string {
+// publishedVolumeLabel is the label as published so far, without reading the root
+// directory. VolumeLabel is the public form and does read it; this exists for the
+// tests that drive publish directly.
+func (e *ExFAT) publishedVolumeLabel() string {
 	e.metaMu.RLock()
 	defer e.metaMu.RUnlock()
 	return e.vbr.volumeLabel

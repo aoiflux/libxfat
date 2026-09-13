@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 func TestReadRootDirIncludesVirtuals(t *testing.T) {
@@ -20,7 +20,7 @@ func TestReadRootDirIncludesVirtuals(t *testing.T) {
 
 	found := map[string]bool{}
 	for _, v := range entries {
-		found[v.GetName()] = true
+		found[v.Name()] = true
 	}
 
 	expected := []string{"$MBR", "$FAT1", "$OrphanFiles"}

@@ -2,14 +2,17 @@ package test
 
 import (
 	"bytes"
+	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 // The synthetic image in this package is deliberately tiny: a single-cluster
@@ -172,28 +175,28 @@ func TestCorpusWalk(t *testing.T) {
 				t.Fatal("ReadRootDir() returned no entries")
 			}
 
-			all, err := fs.GetAllEntries(root)
+			all, err := fs.AllEntries(root)
 			if err != nil {
-				t.Fatalf("GetAllEntries(): %v", err)
+				t.Fatalf("AllEntries(): %v", err)
 			}
 			if len(all) > corpusMaxEntries {
 				t.Logf("image has %d entries; checking the first %d", len(all), corpusMaxEntries)
 				all = all[:corpusMaxEntries]
 			}
 			t.Logf("volume label %q, cluster size %d, %d entries",
-				fs.GetVolumeLabel(), fs.GetClusterSize(), len(all))
+				corpusLabel(t, fs), fs.ClusterSize(), len(all))
 
-			clusterSize := fs.GetClusterSize()
+			clusterSize := fs.ClusterSize()
 			upperBound := time.Now().AddDate(1, 0, 0)
 			lowerBound := time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 
 			var withOffset, withoutOffset int
 
 			for _, entry := range all {
-				name := entry.GetName()
+				name := entry.Name()
 
 				// Timestamps are either absent or a real, plausible instant.
-				ts := entry.GetTimestamps()
+				ts := entry.Timestamps()
 				for label, value := range map[string]time.Time{
 					"modified": ts.Modified,
 					"created":  ts.Created,
@@ -214,36 +217,40 @@ func TestCorpusWalk(t *testing.T) {
 				}
 
 				// Valid data length never exceeds the allocated length.
-				if entry.GetValidDataSize() > entry.GetSize() {
+				if entry.ValidDataSize() > entry.Size() {
 					t.Errorf("%s: valid data length %d exceeds size %d",
-						name, entry.GetValidDataSize(), entry.GetSize())
+						name, entry.ValidDataSize(), entry.Size())
 				}
 
-				if entry.IsDir() || entry.IsDeleted() || entry.GetSize() == 0 {
+				if entry.IsDir() || entry.IsDeleted() || entry.Size() == 0 {
 					continue
 				}
 
 				// Region entries are byte ranges outside the cluster heap, so
 				// they get checked directly rather than through the cluster map.
-				if offset, isRegion := entry.GetRegionOffset(); isRegion {
-					if offset+entry.GetSize() > uint64(size) {
+				if offset, isRegion := entry.RegionOffset(); isRegion {
+					if offset+entry.Size() > uint64(size) {
 						t.Errorf("%s: region [%d, %d) falls outside a %d byte image",
-							name, offset, offset+entry.GetSize(), size)
+							name, offset, offset+entry.Size(), size)
 					}
 					continue
 				}
 
 				// Every fragment must land inside the image.
-				clusters, tail, err := fs.GetClusterList(entry)
+				clusters, tail, err := fs.ClusterList(entry)
 				if err != nil {
-					t.Errorf("%s: GetClusterList(): %v", name, err)
+					t.Errorf("%s: ClusterList(): %v", name, err)
 					continue
 				}
 				if len(clusters) == 0 {
 					continue
 				}
 				for _, cluster := range clusters {
-					offset := fs.GetClusterOffset(cluster)
+					offset, offErr := fs.ClusterOffset(cluster)
+					if offErr != nil {
+						t.Errorf("%q: ClusterOffset(%d): %v", name, cluster, offErr)
+						continue
+					}
 					if offset > uint64(size) || offset+clusterSize > uint64(size) {
 						t.Errorf("%s: cluster %d maps to offset %d, outside a %d byte image",
 							name, cluster, offset, size)
@@ -256,9 +263,9 @@ func TestCorpusWalk(t *testing.T) {
 
 				// The mapped clusters must account for the file's size.
 				mapped := uint64(len(clusters)-1)*clusterSize + tail
-				if mapped < entry.GetSize() {
+				if mapped < entry.Size() {
 					t.Errorf("%s: %d clusters cover %d bytes, less than the %d byte size",
-						name, len(clusters), mapped, entry.GetSize())
+						name, len(clusters), mapped, entry.Size())
 				}
 			}
 
@@ -282,9 +289,9 @@ func TestCorpusExtract(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadRootDir(): %v", err)
 			}
-			all, err := fs.GetAllEntries(root)
+			all, err := fs.AllEntries(root)
 			if err != nil {
-				t.Fatalf("GetAllEntries(): %v", err)
+				t.Fatalf("AllEntries(): %v", err)
 			}
 
 			dir := t.TempDir()
@@ -296,35 +303,35 @@ func TestCorpusExtract(t *testing.T) {
 				if extracted >= corpusMaxExtractedFiles {
 					break
 				}
-				if entry.IsDir() || entry.IsDeleted() || entry.GetSize() == 0 {
+				if entry.IsDir() || entry.IsDeleted() || entry.Size() == 0 {
 					continue
 				}
-				if int64(entry.GetSize()) > budget {
+				if int64(entry.Size()) > budget {
 					skippedForBudget++
 					continue
 				}
 
 				dst := filepath.Join(dir, "extract.bin")
 				if err := fs.ExtractEntryContent(entry, dst); err != nil {
-					t.Errorf("%s: ExtractEntryContent(): %v", entry.GetName(), err)
+					t.Errorf("%s: ExtractEntryContent(): %v", entry.Name(), err)
 					continue
 				}
 				info, err := os.Stat(dst)
 				if err != nil {
-					t.Errorf("%s: Stat(): %v", entry.GetName(), err)
+					t.Errorf("%s: Stat(): %v", entry.Name(), err)
 					continue
 				}
-				if uint64(info.Size()) != entry.GetSize() {
+				if uint64(info.Size()) != entry.Size() {
 					t.Errorf("%s: extracted %d bytes, want %d",
-						entry.GetName(), info.Size(), entry.GetSize())
+						entry.Name(), info.Size(), entry.Size())
 				}
 
 				budget -= info.Size()
 				extracted++
-				if entry.HasFatChain() {
-					fragmented++
-				} else {
+				if entry.IsContiguous() {
 					contiguous++
+				} else {
+					fragmented++
 				}
 			}
 
@@ -368,13 +375,13 @@ func TestCorpusRecoverDeleted(t *testing.T) {
 
 			for _, entry := range deleted {
 				if !entry.IsDeleted() {
-					t.Errorf("%s: recovered entry does not report IsDeleted", entry.GetName())
+					t.Errorf("%s: recovered entry does not report IsDeleted", entry.Name())
 				}
 				// Recovered timestamps go through the same decoder, so they are
 				// subject to the same plausibility requirement.
-				if modified := entry.GetModifiedTime(); !modified.IsZero() {
+				if modified := entry.ModifiedTime(); !modified.IsZero() {
 					if modified.Year() < 1980 || modified.After(time.Now().AddDate(1, 0, 0)) {
-						t.Errorf("%s: implausible recovered modified time %v", entry.GetName(), modified)
+						t.Errorf("%s: implausible recovered modified time %v", entry.Name(), modified)
 					}
 				}
 			}
@@ -465,9 +472,9 @@ func TestCorpusNameHashes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadRootDir(): %v", err)
 			}
-			all, err := fs.GetAllEntries(root)
+			all, err := fs.AllEntries(root)
 			if err != nil {
-				t.Fatalf("GetAllEntries(): %v", err)
+				t.Fatalf("AllEntries(): %v", err)
 			}
 
 			var checked, mismatched, skipped int
@@ -482,7 +489,7 @@ func TestCorpusNameHashes(t *testing.T) {
 						t.Errorf("%v", err)
 					}
 				case err != nil:
-					t.Fatalf("%s: VerifyNameHash(): %v", entry.GetName(), err)
+					t.Fatalf("%s: VerifyNameHash(): %v", entry.Name(), err)
 				default:
 					checked++
 				}
@@ -547,16 +554,16 @@ func TestCorpusStrictMatchesOptimistic(t *testing.T) {
 				if err != nil {
 					t.Fatalf("ReadRootDir(): %v", err)
 				}
-				all, err := fs.GetAllEntries(root)
+				all, err := fs.AllEntries(root)
 				if err != nil {
-					t.Fatalf("GetAllEntries(): %v", err)
+					t.Fatalf("AllEntries(): %v", err)
 				}
 				if len(all) > corpusMaxEntries {
 					all = all[:corpusMaxEntries]
 				}
 				out := make([]string, 0, len(all))
 				for _, entry := range all {
-					out = append(out, entry.GetName())
+					out = append(out, entry.Name())
 				}
 				return out
 			}
@@ -591,9 +598,9 @@ func TestCorpusStrictMatchesOptimistic(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadRootDir(): %v", err)
 			}
-			all, err := strictFS.GetAllEntries(root)
+			all, err := strictFS.AllEntries(root)
 			if err != nil {
-				t.Fatalf("GetAllEntries(): %v", err)
+				t.Fatalf("AllEntries(): %v", err)
 			}
 			var verified, failed int
 			for _, entry := range all {
@@ -610,4 +617,169 @@ func TestCorpusStrictMatchesOptimistic(t *testing.T) {
 			t.Logf("%d entry sets verified, %d failed", verified, failed)
 		})
 	}
+}
+
+// TestCorpusIdentity checks the entry addressing against real volumes, where
+// directories span several clusters and may be fragmented - the conditions the
+// hand-built fixture cannot reproduce.
+//
+// Each entry's reported offset is read back off the image and compared against
+// the entry it claims to describe, using the entry-set checksum, which is derived
+// from the whole set's bytes and so cannot match a neighbouring set. That makes
+// this a check of the addressing itself rather than of the parser agreeing with
+// itself.
+func TestCorpusIdentity(t *testing.T) {
+	for _, path := range corpusImages(t) {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fs, _, ok := openCorpusImage(t, path)
+			if !ok {
+				return
+			}
+
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatalf("reopen %s: %v", path, err)
+			}
+			t.Cleanup(func() { _ = file.Close() })
+
+			root, err := fs.ReadRootDir()
+			if err != nil {
+				t.Fatalf("ReadRootDir(): %v", err)
+			}
+			all, err := fs.AllEntries(root)
+			if err != nil {
+				t.Fatalf("AllEntries(): %v", err)
+			}
+			if len(all) > corpusMaxEntries {
+				all = all[:corpusMaxEntries]
+			}
+
+			record := make([]byte, 32)
+			byID := make(map[libxfat.FileID]string, len(all))
+			var addressed, identified, unaddressed int
+
+			for _, entry := range all {
+				name := entry.Name()
+
+				offset, hasOffset := entry.EntrySetOffset()
+				if !hasOffset {
+					// Only entries the library synthesises may lack a record: the
+					// region entries, and the $OrphanFiles placeholder. Anything
+					// read off the volume has a record and must be able to say
+					// where it is.
+					if !entry.IsVirtualEntry() {
+						t.Errorf("%q: no entry-set offset, but it was read from a directory", name)
+					}
+					unaddressed++
+					continue
+				}
+				addressed++
+
+				if _, err := file.ReadAt(record, offset); err != nil {
+					t.Errorf("%q: reading the record at offset %d: %v", name, offset, err)
+					continue
+				}
+				if record[0] != entry.EntryType() {
+					t.Errorf("%q: record at %d has type 0x%02x, entry says 0x%02x",
+						name, offset, record[0], entry.EntryType())
+					continue
+				}
+				if record[0]&0x7f == 0x05 {
+					expected, _, _ := entry.EntrySetChecksums()
+					if got := binary.LittleEndian.Uint16(record[2:4]); got != expected {
+						t.Errorf("%q: record at %d records checksum 0x%04x, entry expects 0x%04x",
+							name, offset, got, expected)
+					}
+				}
+
+				id, ok := fs.FileID(entry)
+				if !ok {
+					t.Errorf("%q: addressed at %d but not identifiable", name, offset)
+					continue
+				}
+				if previous, clash := byID[id]; clash {
+					t.Errorf("FileID %s is shared by %q and %q", id, previous, name)
+					continue
+				}
+				byID[id] = name
+				identified++
+			}
+
+			if addressed == 0 {
+				t.Fatal("no entry reported an entry-set offset")
+			}
+			t.Logf("%d entries addressed and verified against their own records, %d identified, %d without a record",
+				addressed, identified, unaddressed)
+		})
+	}
+}
+
+// TestCorpusWalkMatchesGetAllEntries cross-checks the new walk against the
+// traversal that predates it, on real volumes. The two are independent
+// implementations - one recursive with a cycle guard and a depth cap, the other a
+// breadth-first loop - so agreeing on the entry set is evidence about both.
+//
+// Deleted entries are included because AllEntries reports them unconditionally.
+// Neither descends into a deleted directory, so the comparison is like for like.
+func TestCorpusWalkMatchesGetAllEntries(t *testing.T) {
+	for _, path := range corpusImages(t) {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			fs, _, ok := openCorpusImage(t, path)
+			if !ok {
+				return
+			}
+
+			root, err := fs.ReadRootDir()
+			if err != nil {
+				t.Fatalf("ReadRootDir(): %v", err)
+			}
+			flat, err := fs.AllEntries(root)
+			if err != nil {
+				t.Fatalf("AllEntries(): %v", err)
+			}
+
+			paths := make(map[string]int)
+			walked := 0
+			err = fs.WalkWithOptions(context.Background(),
+				libxfat.WalkOptions{IncludeDeleted: true},
+				func(p string, _ uint32, entry libxfat.Entry) error {
+					walked++
+					paths[p]++
+					if !strings.HasPrefix(p, "/") {
+						t.Errorf("path %q is not absolute", p)
+					}
+					if name := entry.Name(); !strings.HasSuffix(p, name) {
+						t.Errorf("path %q does not end in the entry name %q", p, name)
+					}
+					return nil
+				})
+			if err != nil {
+				t.Fatalf("Walk: %v", err)
+			}
+
+			if walked != len(flat) {
+				t.Errorf("Walk reported %d entries, AllEntries %d", walked, len(flat))
+			}
+			for p, n := range paths {
+				if n > 1 {
+					t.Errorf("path %q reported %d times", p, n)
+				}
+			}
+			t.Logf("%d entries walked, %d distinct paths", walked, len(paths))
+		})
+	}
+}
+
+// corpusLabel is VolumeLabel reduced to a string for logging: a label that cannot
+// be read is a note in the log, not a reason to fail a test that is about something
+// else.
+func corpusLabel(t *testing.T, fs *libxfat.ExFAT) string {
+	t.Helper()
+
+	label, err := fs.VolumeLabel()
+	if err != nil {
+		t.Logf("VolumeLabel(): %v", err)
+		return "(unreadable)"
+	}
+	return label
 }

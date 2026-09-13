@@ -84,7 +84,7 @@ EXFAT_DIRRECORD_ACT    = 0xE2
 - **Added**: Import of `errors` and `io` packages
 - **Replaced**: Fragile `err.Error() != EOF` string comparisons
 - **With**: Proper `errors.Is(err, io.EOF)` and `errors.Is(err, ErrEOF)` checks
-- **Locations**: `GetAllocatedClusters()`, `ReadDir()`
+- **Locations**: `AllocatedClusters()`, `ReadDir()`
 - **Impact**: More robust error handling, works across error wrapping
 
 ## Testing & Documentation

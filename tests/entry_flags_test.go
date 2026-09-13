@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 func TestEntryIsVirtualEntry(t *testing.T) {
@@ -21,11 +21,11 @@ func TestEntryIsVirtualEntry(t *testing.T) {
 	virtuals := map[string]bool{}
 	regulars := map[string]bool{}
 	for _, entry := range entries {
-		switch entry.GetName() {
+		switch entry.Name() {
 		case "$MBR", "$FAT1", "$OrphanFiles":
-			virtuals[entry.GetName()] = entry.IsVirtualEntry()
+			virtuals[entry.Name()] = entry.IsVirtualEntry()
 		case "$BitMap", "$UpCase", "$Volume GUID":
-			regulars[entry.GetName()] = entry.IsVirtualEntry()
+			regulars[entry.Name()] = entry.IsVirtualEntry()
 		}
 	}
 
@@ -59,7 +59,7 @@ func TestEntryIsSpecialFile(t *testing.T) {
 	found := map[string]bool{}
 	for _, entry := range entries {
 		if entry.IsSpecialFile() {
-			found[entry.GetName()] = true
+			found[entry.Name()] = true
 		}
 	}
 

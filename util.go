@@ -185,47 +185,6 @@ func appendUTF16AsUTF8(dst []byte, units []uint16) []byte {
 	return dst
 }
 
-func getFileAttributes(attr uint16) string {
-	const char = '-'
-	arc := char
-	dir := char
-	sys := char
-	hid := char
-	ro := char
-
-	if attr&ENTRY_ATTR_ATTR_MASK != 0 {
-		arc = 'a'
-	}
-	if attr&ENTRY_ATTR_DIR_MASK != 0 {
-		dir = 'd'
-	}
-	if attr&ENTRY_ATTR_SYSTEM_MASK != 0 {
-		sys = 's'
-	}
-	if attr&ENTRY_ATTR_HIDDEN_MASK != 0 {
-		hid = 'h'
-	}
-	if attr&ENTRY_ATTR_RO_MASK != 0 {
-		ro = 'r'
-	}
-
-	fileAttributeString := fmt.Sprintf("%c%c%c%c%c", arc, dir, sys, hid, ro)
-	return fileAttributeString
-}
-
-func humanize(b uint64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
 func getRange(index uint32, count uint64) []uint32 {
 	list := make([]uint32, 0, count)
 	for count != 0 {

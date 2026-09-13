@@ -268,7 +268,7 @@ func rangeOffsetMapper(ranges []Range) func(int64) int64 {
 // occupies a fixed byte range outside the cluster heap.
 //
 // The cluster fields are left zero: the bytes are real, the cluster addressing is
-// not. GetClusterList refuses these entries, and correctly so, because it is a
+// not. ClusterList refuses these entries, and correctly so, because it is a
 // cluster API. The extent API accepts them because a byte range is exactly what
 // it deals in, and a caller intersecting a file against changed image ranges has
 // no reason to care which side of the heap boundary the bytes lie on.
@@ -453,7 +453,7 @@ func (e *ExFAT) firstClusterOnly(entry Entry) (*FragmentResult, error) {
 //
 // It reads the single bitmap byte holding that cluster's bit, located through the
 // bitmap stream's own extents so that a fragmented bitmap is handled correctly.
-// GetAllocatedClusters and GetFreeClusters read the whole bitmap; this does not.
+// AllocatedClusters and FreeClusters read the whole bitmap; this does not.
 func (e *ExFAT) IsClusterAllocated(cluster uint32) (bool, error) {
 	if !e.vbr.isValidCluster(cluster) {
 		return false, fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)

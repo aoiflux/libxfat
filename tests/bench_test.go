@@ -8,7 +8,7 @@ import (
 	"testing"
 	"unicode/utf16"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 // Volume-level benchmarks: the paths that involve reads, and whose cost scales
@@ -225,7 +225,7 @@ func BenchmarkWalkTree(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := fs.GetAllEntries(root); err != nil {
+		if _, err := fs.AllEntries(root); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -242,7 +242,7 @@ func BenchmarkGetFullPathIndexableEntries(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := fs.GetFullPathIndexableEntries(root, "/"); err != nil {
+		if _, err := fs.ContiguousFilePaths(root, "/"); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -273,7 +273,7 @@ func BenchmarkVerifyNameHash(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	all, err := fs.GetAllEntries(root)
+	all, err := fs.AllEntries(root)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func BenchmarkVerifyNameHash(b *testing.B) {
 
 // openSuperfloppyBench opens the audited fixture rather than buildBenchImage,
 // because buildBenchImage's files are all zero-length and contiguous - it has no
-// FAT chain for GetClusterList to walk.
+// FAT chain for ClusterList to walk.
 func openSuperfloppyBench(b *testing.B) *libxfat.ExFAT {
 	b.Helper()
 
@@ -333,12 +333,12 @@ func BenchmarkGetClusterListChained(b *testing.B) {
 
 	var target libxfat.Entry
 	for _, entry := range root {
-		if entry.GetName() == "fragmented.bin" {
+		if entry.Name() == "fragmented.bin" {
 			target = entry
 			break
 		}
 	}
-	if target.GetName() != "fragmented.bin" {
+	if target.Name() != "fragmented.bin" {
 		b.Fatal("fragmented.bin not found in fixture root")
 	}
 
@@ -346,7 +346,7 @@ func BenchmarkGetClusterListChained(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if _, _, err := fs.GetClusterList(target); err != nil {
+		if _, _, err := fs.ClusterList(target); err != nil {
 			b.Fatal(err)
 		}
 	}

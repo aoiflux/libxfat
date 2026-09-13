@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 func main() {
@@ -37,7 +37,7 @@ func main() {
 	}
 
 	for _, entry := range rootEntries {
-		fmt.Printf("%-16s %-24s size=%-8d cluster=%d\n", entryKind(entry), entry.GetName(), entry.GetSize(), entry.GetEntryCluster())
+		fmt.Printf("%-16s %-24s size=%-8d cluster=%d\n", entryKind(entry), entry.Name(), entry.Size(), entry.FirstCluster())
 	}
 }
 

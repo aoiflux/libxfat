@@ -27,9 +27,9 @@ func TestConcurrentVolumeUse(t *testing.T) {
 	}
 
 	// Baselines taken serially, to compare the concurrent results against.
-	wantAll, err := fs.GetAllEntries(root)
+	wantAll, err := fs.AllEntries(root)
 	if err != nil {
-		t.Fatalf("GetAllEntries: %v", err)
+		t.Fatalf("AllEntries: %v", err)
 	}
 	wantContent, err := fs.ReadEntry(entryNamed(t, fs, "fragmented.bin"))
 	if err != nil {
@@ -46,9 +46,9 @@ func TestConcurrentVolumeUse(t *testing.T) {
 			defer wg.Done()
 
 			// A full tree walk, which is the parser-state case.
-			got, err := fs.GetAllEntries(root)
+			got, err := fs.AllEntries(root)
 			if err != nil {
-				errs <- "GetAllEntries: " + err.Error()
+				errs <- "AllEntries: " + err.Error()
 				return
 			}
 			if len(got) != len(wantAll) {

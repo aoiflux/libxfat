@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 func main() {
@@ -32,16 +34,16 @@ func main() {
 		log.Fatalf("parse exFAT: %v", err)
 	}
 
-	rootEntries, err := exfat.ReadRootDir()
-	if err != nil {
-		log.Fatalf("read root directory: %v", err)
-	}
-
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		log.Fatalf("create output directory: %v", err)
 	}
 
-	if err := exfat.ExtractAllFiles(rootEntries, *outDir); err != nil {
+	// Extraction reads the whole volume, so let Ctrl-C stop it. ExtractAllFiles
+	// keeps what it has already written.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	if err := exfat.ExtractAllFiles(ctx, *outDir); err != nil {
 		log.Fatalf("extract files: %v", err)
 	}
 

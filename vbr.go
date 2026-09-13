@@ -49,8 +49,9 @@ func (v *VBR) parseVBRData(vbr []byte, src Source) error {
 	v.dataRegionOffset = unpackLELong(vbr[EXFAT_DATA_OFFSET : EXFAT_DATA_OFFSET+4])
 	v.nbClusters = unpackLELong(vbr[EXFAT_NB_CLUSTERS : EXFAT_NB_CLUSTERS+4])
 	v.rootDirCluster = unpackLELong(vbr[EXFAT_ROOT_CLUSTER_OFFSET : EXFAT_ROOT_CLUSTER_OFFSET+4])
-	v.sn = vbr[EXFAT_SN_OFFSET : EXFAT_SN_OFFSET+4]
+	v.serialNumber = unpackLELong(vbr[EXFAT_SN_OFFSET : EXFAT_SN_OFFSET+4])
 	v.version = unpackLEShort(vbr[EXFAT_VERSION_OFFSET : EXFAT_VERSION_OFFSET+2])
+	v.volumeFlags = unpackLEShort(vbr[EXFAT_VOLUME_FLAGS_OFFSET : EXFAT_VOLUME_FLAGS_OFFSET+2])
 	v.sectorSize = 1 << vbr[EXFAT_SECTOR_SIZE_OFFSET]
 	v.sectorsPerCluster = 1 << vbr[EXFAT_CLUSTER_SIZE_OFFSET]
 	v.numberOfFats = vbr[EXFAT_NUMBER_OF_FATS_OFFSET]

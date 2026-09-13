@@ -322,7 +322,7 @@ Some files are stored **contiguously** (in sequential clusters) without fragment
 - Marked in the file's stream extension entry
 
 ```go
-if entry.DoesNotHaveFatChain() {
+if entry.IsContiguous() {
     // Read sequentially without FAT lookups
     data := readClusters(startCluster, numberOfClusters)
 } else {
@@ -821,7 +821,7 @@ func (v *VBR) nextCluster(cluster uint32) uint32 {
 ExFAT has an allocation bitmap (like a FAT but just bits):
 
 ```go
-func (e *ExFAT) GetAllocatedClusters() uint32 {
+func (e *ExFAT) AllocatedClusters() uint32 {
     // Read bitmap file
     bitmapData := e.vbr.readContent(e.bitmapEntry)
 

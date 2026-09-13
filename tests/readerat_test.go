@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 // testImageBytes builds the same minimal volume as createTestImage, but as a
@@ -32,8 +32,8 @@ func summarise(entries []libxfat.Entry) []string {
 	out := make([]string, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, fmt.Sprintf("%s|0x%02X|%d|%d|%s|%s",
-			e.GetName(), e.GetEntryType(), e.GetSize(), e.GetEntryCluster(),
-			e.GetModifiedTime(), e.GetCreatedTime()))
+			e.Name(), e.EntryType(), e.Size(), e.FirstCluster(),
+			e.ModifiedTime(), e.CreatedTime()))
 	}
 	return out
 }
@@ -49,16 +49,18 @@ func probe(t *testing.T, fs *libxfat.ExFAT) []string {
 		out = append(out, fmt.Sprintf(format, args...))
 	}
 
-	record("clusterSize=%d", fs.GetClusterSize())
-	record("usedSpace=%s", fs.GetUsedSpace())
-	record("volumeLabel=%q", fs.GetVolumeLabel())
+	record("clusterSize=%d", fs.ClusterSize())
+	record("percentInUse=%d", fs.PercentInUse())
+	label, labelErr := fs.VolumeLabel()
+	record("volumeLabel=%q err=%v", label, labelErr)
 	for cluster := uint32(2); cluster <= 5; cluster++ {
-		record("clusterOffset[%d]=%d", cluster, fs.GetClusterOffset(cluster))
+		offset, offErr := fs.ClusterOffset(cluster)
+		record("clusterOffset[%d]=%d err=%v", cluster, offset, offErr)
 	}
 
-	allocated, err := fs.GetAllocatedClusters()
+	allocated, err := fs.AllocatedClusters()
 	record("allocatedClusters=%d err=%v", allocated, err)
-	free, err := fs.GetFreeClusters()
+	free, err := fs.FreeClusters()
 	record("freeClusters=%d err=%v", free, err)
 
 	root, err := fs.ReadRootDir()
@@ -67,7 +69,7 @@ func probe(t *testing.T, fs *libxfat.ExFAT) []string {
 		record("root[%d]=%s", i, line)
 	}
 
-	all, err := fs.GetAllEntries(root)
+	all, err := fs.AllEntries(root)
 	record("getAllEntries err=%v", err)
 	for i, line := range summarise(all) {
 		record("all[%d]=%s", i, line)
@@ -83,23 +85,23 @@ func probe(t *testing.T, fs *libxfat.ExFAT) []string {
 	// consumer depends on most, so compare both directly.
 	dir := t.TempDir()
 	for _, entry := range root {
-		clusters, tail, err := fs.GetClusterList(entry)
-		record("clusterList[%s]=%v tail=%d err=%v", entry.GetName(), clusters, tail, err)
+		clusters, tail, err := fs.ClusterList(entry)
+		record("clusterList[%s]=%v tail=%d err=%v", entry.Name(), clusters, tail, err)
 
 		if !entry.IsMetadataStream() && !entry.IsRegion() {
 			continue
 		}
-		dst := filepath.Join(dir, strings.ReplaceAll(entry.GetName(), "$", "_"))
+		dst := filepath.Join(dir, strings.ReplaceAll(entry.Name(), "$", "_"))
 		if err := fs.ExtractEntryContent(entry, dst); err != nil {
-			record("extract[%s] err=%v", entry.GetName(), err)
+			record("extract[%s] err=%v", entry.Name(), err)
 			continue
 		}
 		content, err := os.ReadFile(dst)
 		if err != nil {
-			record("extract[%s] read err=%v", entry.GetName(), err)
+			record("extract[%s] read err=%v", entry.Name(), err)
 			continue
 		}
-		record("extract[%s]=%x", entry.GetName(), sha256.Sum256(content))
+		record("extract[%s]=%x", entry.Name(), sha256.Sum256(content))
 	}
 
 	return out

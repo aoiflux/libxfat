@@ -11,7 +11,7 @@ import (
 	"testing"
 	"unicode/utf16"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 // This fixture is a superfloppy: an exFAT volume that begins at byte 0 of the
@@ -33,6 +33,14 @@ const (
 
 	// The lie: the volume claims to live at LBA 2048 while sitting at byte 0.
 	sfClaimedPartitionLBA = 2048
+
+	// sfSerialNumber is what the boot sector records as VolumeSerialNumber. Real
+	// formatters derive one from the clock; the value itself means nothing, which
+	// is the point of asserting that the library reports it unchanged.
+	sfSerialNumber = 0xdeadbeef
+
+	// sfVolumeLabel is the label record's contents.
+	sfVolumeLabel = "EVIDENCE"
 )
 
 // Cluster assignments, written out rather than computed so the expected layout
@@ -54,7 +62,47 @@ const (
 	sfNamelessCluster  = 17 // a directory whose name records are all NUL
 	sfBuriedCluster    = 18 // its child, reachable only by traversing it
 	sfLastUsedCluster  = sfBuriedCluster
+
+	// sfOrphanCluster is deliberately *not* allocated and has no FAT entry. It
+	// holds the records of a file whose directory is gone, which is the only
+	// thing RecoverDeletedEntries looks at: a deleted record still listed in a
+	// live directory, as /docs/erased.txt is, is found by reading that directory
+	// instead. The content of an unallocated cluster is undefined by the
+	// specification, so leaving records in one costs the fixture no conformance.
+	// Cluster 19 is left genuinely empty, so the scan has to cope with both.
+	sfOrphanCluster = 20
+	sfOrphanTarget  = 21 // where the vanished file's data would have been
+
+	// Allocations that are not part of the contiguous run from the root, so the
+	// loops that fill the FAT and the bitmap cannot sweep them and they are listed
+	// out explicitly. Each exists to make a specific answer testable.
+	//
+	// sfUnwrittenCluster backs a file whose ValidDataLength is far short of its
+	// DataLength, which is the only way UnwrittenRanges has anything to describe.
+	//
+	// The three-run chain is three runs because two cannot tell correct coalescing
+	// from one-run-per-cluster luck, and the descending chain goes backwards
+	// because an implementation comparing "is this cluster different from the last"
+	// rather than "is it the next one" merges a backwards pair into a single run
+	// covering a negative length.
+	sfUnwrittenCluster = 19
+	sfThreeRunA        = 22 // chains 22 -> 24 -> 26, gaps at 23 and 25
+	sfThreeRunB        = 24
+	sfThreeRunC        = 26
+	sfDescendHigh      = 30 // chains 30 -> 29
+	sfDescendLow       = 29
 )
+
+// sfExtraChains are the FAT links for the clusters above, as from -> to pairs with
+// 0xffffffff for end of chain.
+var sfExtraChains = [][2]uint32{
+	{sfUnwrittenCluster, 0xffffffff},
+	{sfThreeRunA, sfThreeRunB},
+	{sfThreeRunB, sfThreeRunC},
+	{sfThreeRunC, 0xffffffff},
+	{sfDescendHigh, sfDescendLow},
+	{sfDescendLow, 0xffffffff},
+}
 
 // sfNamelessName is a name made only of NUL code units: the records are present
 // and the length is honest, but nothing decodes. Left unnamed, the directory
@@ -78,7 +126,14 @@ type sfEntrySet struct {
 	size       uint64
 	noFatChain bool
 	deleted    bool
+	// validSize is ValidDataLength when set. A pointer rather than a plain
+	// uint64 because zero is a meaningful value - an allocation nothing was ever
+	// written into - and cannot double as "same as size".
+	validSize *uint64
 }
+
+// sfValid is validSize's constructor, so a fixture entry can be written inline.
+func sfValid(n uint64) *uint64 { return &n }
 
 // sfBootChecksum is the BootChecksum routine from section 3.4 of the exFAT
 // specification: a 32-bit rotate-and-add over the first 11 sectors of the boot
@@ -176,7 +231,11 @@ func sfBuildEntrySet(s sfEntrySet) []byte {
 	}
 	stream[3] = byte(len(units))
 	binary.LittleEndian.PutUint16(stream[4:6], sfNameHash(s.name))
-	binary.LittleEndian.PutUint64(stream[8:16], s.size)
+	validSize := s.size
+	if s.validSize != nil {
+		validSize = *s.validSize
+	}
+	binary.LittleEndian.PutUint64(stream[8:16], validSize)
 	binary.LittleEndian.PutUint32(stream[20:24], s.cluster)
 	binary.LittleEndian.PutUint64(stream[24:32], s.size)
 
@@ -215,7 +274,11 @@ func buildSuperfloppyImage() []byte {
 	binary.LittleEndian.PutUint32(vbr[0x58:0x5c], sfHeapOffsetSector)
 	binary.LittleEndian.PutUint32(vbr[0x5c:0x60], sfClusterCount)
 	binary.LittleEndian.PutUint32(vbr[0x60:0x64], sfRootCluster)
+	binary.LittleEndian.PutUint32(vbr[0x64:0x68], sfSerialNumber)
 	binary.LittleEndian.PutUint16(vbr[0x68:0x6a], 0x0100)
+	// VolumeFlags is left zero: clean, first FAT active, no media failure. A test
+	// that needs a flag set patches a copy of the image.
+	binary.LittleEndian.PutUint16(vbr[0x6a:0x6c], 0)
 	vbr[0x6c] = 9 // bytes per sector shift: 512
 	vbr[0x6d] = 3 // sectors per cluster shift: 8
 	vbr[0x6e] = 1 // number of FATs
@@ -253,6 +316,11 @@ func buildSuperfloppyImage() []byte {
 	setFat(sfFragmentCluster, sfFragmentCluster2)
 	setFat(sfFragmentCluster2, 0xffffffff)
 
+	// The chains that sit outside the contiguous run from the root.
+	for _, link := range sfExtraChains {
+		setFat(link[0], link[1])
+	}
+
 	clusterAt := func(cluster uint32) []byte {
 		start := sfHeapOffsetSector*sfSectorSize + int(cluster-2)*sfClusterSize
 		return image[start : start+sfClusterSize]
@@ -260,9 +328,17 @@ func buildSuperfloppyImage() []byte {
 
 	// --- Allocation bitmap: clusters 2..16 are in use ---
 	bitmap := clusterAt(sfBitmapCluster)
-	for cluster := uint32(sfRootCluster); cluster <= sfLastUsedCluster; cluster++ {
+	markAllocated := func(cluster uint32) {
 		index := cluster - 2
 		bitmap[index/8] |= 1 << (index % 8)
+	}
+	for cluster := uint32(sfRootCluster); cluster <= sfLastUsedCluster; cluster++ {
+		markAllocated(cluster)
+	}
+	// The clusters the run above does not reach. The gaps between them stay free,
+	// which is what makes the chains through them genuinely fragmented.
+	for _, link := range sfExtraChains {
+		markAllocated(link[0])
 	}
 
 	// --- Root directory ---
@@ -278,7 +354,7 @@ func buildSuperfloppyImage() []byte {
 	// on that assumption. Matching the convention keeps the fixture auditable.
 	label := make([]byte, 32)
 	label[0] = 0x83
-	labelUnits := utf16.Encode([]rune("EVIDENCE"))
+	labelUnits := utf16.Encode([]rune(sfVolumeLabel))
 	label[1] = byte(len(labelUnits))
 	for i, u := range labelUnits {
 		binary.LittleEndian.PutUint16(label[2+i*2:4+i*2], u)
@@ -329,6 +405,16 @@ func buildSuperfloppyImage() []byte {
 	offset = appendRecords(root, offset, sfBuildEntrySet(sfEntrySet{
 		name: "docs", attrs: 0x10, cluster: sfDocsCluster, size: sfClusterSize,
 	}))
+	offset = appendRecords(root, offset, sfBuildEntrySet(sfEntrySet{
+		name: "unwritten.bin", attrs: 0x20, cluster: sfUnwrittenCluster, size: 3000,
+		validSize: sfValid(100), noFatChain: true,
+	}))
+	offset = appendRecords(root, offset, sfBuildEntrySet(sfEntrySet{
+		name: "threerun.bin", attrs: 0x20, cluster: sfThreeRunA, size: 10000,
+	}))
+	offset = appendRecords(root, offset, sfBuildEntrySet(sfEntrySet{
+		name: "descending.bin", attrs: 0x20, cluster: sfDescendHigh, size: 5000,
+	}))
 	appendRecords(root, offset, sfBuildEntrySet(sfEntrySet{
 		name: "fragmented.bin", attrs: 0x20, cluster: sfFragmentCluster, size: 8000,
 	}))
@@ -345,7 +431,7 @@ func buildSuperfloppyImage() []byte {
 		name: "erased.txt", attrs: 0x20, cluster: sfErasedCluster, size: 64,
 		noFatChain: true, deleted: true,
 	}))
-	appendRecords(docs, offset, sfBuildEntrySet(sfEntrySet{
+	offset = appendRecords(docs, offset, sfBuildEntrySet(sfEntrySet{
 		name: sfNamelessName, attrs: 0x10, cluster: sfNamelessCluster, size: sfClusterSize,
 	}))
 
@@ -361,15 +447,50 @@ func buildSuperfloppyImage() []byte {
 		name: "buried.txt", attrs: 0x20, cluster: sfBuriedCluster, size: 33, noFatChain: true,
 	}))
 
+	// --- A deleted directory whose cluster is still free ---
+	//
+	// It is the only way to reach sfOrphanCluster by name: its record survives in
+	// /docs, says the directory began at cluster 20, and records NoFatChain, so
+	// the range is known without a chain to follow. Descending it recovers
+	// vanished.txt under a real path, where the free-space sweep recovers the same
+	// record with no path at all.
+	appendRecords(docs, offset, sfBuildEntrySet(sfEntrySet{
+		name: "gone", attrs: 0x10, cluster: sfOrphanCluster, size: sfClusterSize,
+		noFatChain: true, deleted: true,
+	}))
+
+	// --- An unallocated cluster holding the records of a vanished file ---
+	orphan := clusterAt(sfOrphanCluster)
+	appendRecords(orphan, 0, sfBuildEntrySet(sfEntrySet{
+		name: "vanished.txt", attrs: 0x20, cluster: sfOrphanTarget, size: 42,
+		noFatChain: true, deleted: true,
+	}))
+
 	// --- File content, so extraction has something recognisable to read ---
+	//
+	// The two multi-cluster files get a different byte in each cluster. A single
+	// fill byte cannot tell a reader that fetched the second cluster from one that
+	// read the first one twice, which for a fragmented file is exactly the mistake
+	// worth catching.
 	for cluster, fill := range map[uint32]byte{
-		sfReadmeCluster:   'R',
-		sfLongNameCluster: 'L',
-		sfUnicodeCluster:  'U',
-		sfNotesCluster:    'N',
-		sfDeepCluster:     'D',
-		sfFragmentCluster: 'F',
-		sfBuriedCluster:   'B',
+		sfReadmeCluster:    'R',
+		sfLongNameCluster:  'L',
+		sfUnicodeCluster:   'U',
+		sfNotesCluster:     'N',
+		sfDeepCluster:      'D', // spans 9 and 10, contiguously
+		sfDeepCluster + 1:  'd',
+		sfFragmentCluster:  'F', // chains 12 -> 14
+		sfFragmentCluster2: 'f',
+		sfBuriedCluster:    'B',
+
+		// One byte per run, so a reader that visits the runs out of order, or
+		// merges two of them, produces content this fixture can distinguish.
+		sfUnwrittenCluster: 'W',
+		sfThreeRunA:        '1',
+		sfThreeRunB:        '2',
+		sfThreeRunC:        '3',
+		sfDescendHigh:      'H',
+		sfDescendLow:       'L',
 	} {
 		data := clusterAt(cluster)
 		for i := range data {
@@ -446,7 +567,7 @@ func openSuperfloppy(t *testing.T, strict bool) *libxfat.ExFAT {
 func sortedNames(entries []libxfat.Entry) []string {
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		names = append(names, entry.GetName())
+		names = append(names, entry.Name())
 	}
 	sort.Strings(names)
 	return names
@@ -459,9 +580,9 @@ func collectAll(t *testing.T, fs *libxfat.ExFAT) []libxfat.Entry {
 	if err != nil {
 		t.Fatalf("ReadRootDir: %v", err)
 	}
-	entries, err := fs.GetAllEntries(root)
+	entries, err := fs.AllEntries(root)
 	if err != nil {
-		t.Fatalf("GetAllEntries: %v", err)
+		t.Fatalf("AllEntries: %v", err)
 	}
 	return entries
 }
@@ -473,16 +594,16 @@ func collectFullPaths(t *testing.T, fs *libxfat.ExFAT) []string {
 	if err != nil {
 		t.Fatalf("ReadRootDir: %v", err)
 	}
-	entries, err := fs.GetFullPathIndexableEntries(root, "/")
+	entries, err := fs.ContiguousFilePaths(root, "/")
 	if err != nil {
-		t.Fatalf("GetFullPathIndexableEntries: %v", err)
+		t.Fatalf("ContiguousFilePaths: %v", err)
 	}
 	return sortedNames(entries)
 }
 
 // TestSuperfloppyStrictYieldsNames is the acceptance test for the bug: on a
 // volume whose VBR records a non-zero PartitionOffset, strict mode returned an
-// entry set for every file with GetName() == "", which in turn stopped
+// entry set for every file with Name() == "", which in turn stopped
 // directory recursion because a nameless directory is treated as unreadable.
 func TestSuperfloppyStrictYieldsNames(t *testing.T) {
 	fs := openSuperfloppy(t, true)
@@ -490,15 +611,19 @@ func TestSuperfloppyStrictYieldsNames(t *testing.T) {
 
 	want := []string{
 		"$BitMap", "$FAT1", "$MBR", "$OrphanFiles", "$UpCase",
-		"buried.txt", "deep.bin", "docs", "erased.txt (deleted)",
-		"fragmented.bin", "nested", "notes.txt", "readme.txt",
+		"buried.txt", "deep.bin", "descending.bin", "docs", "erased.txt (deleted)",
+		"fragmented.bin", "gone (deleted)", "nested", "notes.txt", "readme.txt",
+		"threerun.bin", "unwritten.bin",
 		sfUnnamedDirName, sfLongName, sfUnicodeName,
 	}
+	// "gone" is a deleted directory. AllEntries reports it but does not
+	// descend into it, so vanished.txt is absent here; Walk with
+	// DescendDeletedDirectories is what recovers that.
 	sort.Strings(want)
 
 	got := sortedNames(entries)
 	if len(got) != len(want) {
-		t.Fatalf("GetAllEntries returned %d entries %q, want %d %q", len(got), got, len(want), want)
+		t.Fatalf("AllEntries returned %d entries %q, want %d %q", len(got), got, len(want), want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -507,7 +632,7 @@ func TestSuperfloppyStrictYieldsNames(t *testing.T) {
 	}
 
 	for _, entry := range entries {
-		if entry.GetName() == "" {
+		if entry.Name() == "" {
 			t.Error("strict mode produced an entry with an empty name")
 		}
 	}
@@ -536,20 +661,20 @@ func TestSuperfloppyStrictMatchesOptimistic(t *testing.T) {
 	// Sizes and clusters must agree too, not just names.
 	byName := make(map[string]libxfat.Entry, len(optimisticEntries))
 	for _, entry := range optimisticEntries {
-		byName[entry.GetName()] = entry
+		byName[entry.Name()] = entry
 	}
 	for _, entry := range strictEntries {
-		other, ok := byName[entry.GetName()]
+		other, ok := byName[entry.Name()]
 		if !ok {
-			t.Errorf("%q missing from optimistic results", entry.GetName())
+			t.Errorf("%q missing from optimistic results", entry.Name())
 			continue
 		}
-		if entry.GetSize() != other.GetSize() {
-			t.Errorf("%q size: strict %d, optimistic %d", entry.GetName(), entry.GetSize(), other.GetSize())
+		if entry.Size() != other.Size() {
+			t.Errorf("%q size: strict %d, optimistic %d", entry.Name(), entry.Size(), other.Size())
 		}
-		if entry.GetEntryCluster() != other.GetEntryCluster() {
+		if entry.FirstCluster() != other.FirstCluster() {
 			t.Errorf("%q cluster: strict %d, optimistic %d",
-				entry.GetName(), entry.GetEntryCluster(), other.GetEntryCluster())
+				entry.Name(), entry.FirstCluster(), other.FirstCluster())
 		}
 	}
 }
@@ -571,6 +696,10 @@ func TestSuperfloppyFullPathsAreComposed(t *testing.T) {
 		"/docs/nested/deep.bin",
 		"/docs/notes.txt",
 		"/readme.txt",
+		// Contiguous, so it passes the filter. threerun.bin and descending.bin
+		// have FAT chains and are excluded - which is the filter's documented and
+		// unhelpful behaviour, pinned here rather than left to be rediscovered.
+		"/unwritten.bin",
 		"/" + sfLongName,
 		"/" + sfUnicodeName,
 	}
@@ -606,17 +735,17 @@ func TestSuperfloppyFullPathsAreComposed(t *testing.T) {
 // there for actually ran and passed, rather than being skipped into silence.
 func TestSuperfloppyStrictVerifiesChecksums(t *testing.T) {
 	for _, entry := range collectAll(t, openSuperfloppy(t, true)) {
-		if entry.GetEntryType() != 0x85 {
+		if entry.EntryType() != 0x85 {
 			continue
 		}
 		if !entry.NameChecksumVerified() {
-			t.Errorf("%q did not verify: %v", entry.GetName(), entry.NameChecksumError())
+			t.Errorf("%q did not verify: %v", entry.Name(), entry.NameChecksumError())
 		}
 	}
 }
 
 // TestSuperfloppyFullPathsMatchFlatIndex ties the two indexing calls together.
-// They apply the same IsIndexable test to the same tree, so they must agree on
+// They apply the same IsContiguousFile test to the same tree, so they must agree on
 // which entries qualify; the only difference should be that one composes paths.
 //
 // They used to disagree by exactly the two synthetic entries, because composing
@@ -628,27 +757,27 @@ func TestSuperfloppyFullPathsMatchFlatIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadRootDir: %v", err)
 	}
-	flat, err := fs.GetIndexableEntries(root)
+	flat, err := fs.ContiguousFiles(root)
 	if err != nil {
-		t.Fatalf("GetIndexableEntries: %v", err)
+		t.Fatalf("ContiguousFiles: %v", err)
 	}
-	full, err := fs.GetFullPathIndexableEntries(root, "/")
+	full, err := fs.ContiguousFilePaths(root, "/")
 	if err != nil {
-		t.Fatalf("GetFullPathIndexableEntries: %v", err)
+		t.Fatalf("ContiguousFilePaths: %v", err)
 	}
 
 	if len(flat) != len(full) {
-		t.Fatalf("GetIndexableEntries returned %d entries %q, GetFullPathIndexableEntries %d %q",
+		t.Fatalf("ContiguousFiles returned %d entries %q, ContiguousFilePaths %d %q",
 			len(flat), sortedNames(flat), len(full), sortedNames(full))
 	}
 
 	// Every composed path must end in the basename the flat index reported.
 	basenames := make(map[string]int, len(flat))
 	for _, entry := range flat {
-		basenames[entry.GetName()]++
+		basenames[entry.Name()]++
 	}
 	for _, entry := range full {
-		path := entry.GetName()
+		path := entry.Name()
 		base := path[strings.LastIndex(path, "/")+1:]
 		if basenames[base] == 0 {
 			t.Errorf("%q has no counterpart in the flat index", path)
@@ -673,29 +802,29 @@ func TestSuperfloppySyntheticEntriesSurvivePathComposition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadRootDir: %v", err)
 	}
-	full, err := fs.GetFullPathIndexableEntries(root, "/")
+	full, err := fs.ContiguousFilePaths(root, "/")
 	if err != nil {
-		t.Fatalf("GetFullPathIndexableEntries: %v", err)
+		t.Fatalf("ContiguousFilePaths: %v", err)
 	}
 
 	found := map[string]bool{"/$MBR": false, "/$FAT1": false}
 	for _, entry := range full {
-		name := entry.GetName()
+		name := entry.Name()
 		if _, want := found[name]; !want {
 			continue
 		}
 		found[name] = true
 
-		offset, isRegion := entry.GetRegionOffset()
+		offset, isRegion := entry.RegionOffset()
 		if !isRegion {
 			t.Errorf("%s no longer reports itself as a region", name)
 		}
-		if entry.GetSize() == 0 {
+		if entry.Size() == 0 {
 			t.Errorf("%s has zero size", name)
 		}
-		if offset+entry.GetSize() > uint64(sfVolumeSectors*sfSectorSize) {
+		if offset+entry.Size() > uint64(sfVolumeSectors*sfSectorSize) {
 			t.Errorf("%s spans [%d, %d), past the end of the image",
-				name, offset, offset+entry.GetSize())
+				name, offset, offset+entry.Size())
 		}
 	}
 
@@ -718,39 +847,39 @@ func TestSuperfloppyCountClustersAgreesWithClusterList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadRootDir: %v", err)
 	}
-	all, err := fs.GetAllEntries(root)
+	all, err := fs.AllEntries(root)
 	if err != nil {
-		t.Fatalf("GetAllEntries: %v", err)
+		t.Fatalf("AllEntries: %v", err)
 	}
 
 	var regions int
 	for _, entry := range all {
-		if entry.IsDeleted() || entry.GetSize() == 0 {
+		if entry.IsDeleted() || entry.Size() == 0 {
 			continue
 		}
 
-		clusters, _, listErr := fs.GetClusterList(entry)
+		clusters, _, listErr := fs.ClusterList(entry)
 		count, countErr := fs.CountClusters(entry)
 
-		if _, isRegion := entry.GetRegionOffset(); isRegion {
+		if _, isRegion := entry.RegionOffset(); isRegion {
 			regions++
 			if !errors.Is(listErr, libxfat.ErrNoClusterMapping) {
-				t.Errorf("%s: GetClusterList = %v, want ErrNoClusterMapping", entry.GetName(), listErr)
+				t.Errorf("%s: ClusterList = %v, want ErrNoClusterMapping", entry.Name(), listErr)
 			}
 			if !errors.Is(countErr, libxfat.ErrNoClusterMapping) {
 				t.Errorf("%s: CountClusters = (%d, %v), want ErrNoClusterMapping",
-					entry.GetName(), count, countErr)
+					entry.Name(), count, countErr)
 			}
 			continue
 		}
 
 		if listErr != nil || countErr != nil {
-			t.Errorf("%s: GetClusterList = %v, CountClusters = %v", entry.GetName(), listErr, countErr)
+			t.Errorf("%s: ClusterList = %v, CountClusters = %v", entry.Name(), listErr, countErr)
 			continue
 		}
 		if count != len(clusters) {
-			t.Errorf("%s: CountClusters = %d, GetClusterList returned %d clusters",
-				entry.GetName(), count, len(clusters))
+			t.Errorf("%s: CountClusters = %d, ClusterList returned %d clusters",
+				entry.Name(), count, len(clusters))
 		}
 	}
 
@@ -768,9 +897,9 @@ func TestSuperfloppyNameHashesVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadRootDir: %v", err)
 	}
-	all, err := fs.GetAllEntries(root)
+	all, err := fs.AllEntries(root)
 	if err != nil {
-		t.Fatalf("GetAllEntries: %v", err)
+		t.Fatalf("AllEntries: %v", err)
 	}
 
 	var checked int
@@ -780,7 +909,7 @@ func TestSuperfloppyNameHashesVerify(t *testing.T) {
 			continue
 		}
 		if err != nil {
-			t.Errorf("%s: %v", entry.GetName(), err)
+			t.Errorf("%s: %v", entry.Name(), err)
 			continue
 		}
 		checked++
@@ -832,15 +961,15 @@ func TestSuperfloppyDetectsCorruptNameHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadRootDir: %v", err)
 	}
-	all, err := fs.GetAllEntries(root)
+	all, err := fs.AllEntries(root)
 	if err != nil {
-		t.Fatalf("GetAllEntries: %v", err)
+		t.Fatalf("AllEntries: %v", err)
 	}
 
 	var mismatched []string
 	for _, entry := range all {
 		if err := fs.VerifyNameHash(entry); errors.Is(err, libxfat.ErrNameHashMismatch) {
-			mismatched = append(mismatched, entry.GetName())
+			mismatched = append(mismatched, entry.Name())
 		}
 	}
 
@@ -852,7 +981,7 @@ func TestSuperfloppyDetectsCorruptNameHash(t *testing.T) {
 	// should disagree in the expected direction: this is precisely the case the
 	// hash catches and a caller may want to see.
 	for _, entry := range all {
-		if entry.GetName() == "readme.txt" && entry.NameChecksumVerified() {
+		if entry.Name() == "readme.txt" && entry.NameChecksumVerified() {
 			t.Error("the set checksum still verifies over a byte that was changed")
 		}
 	}
@@ -868,7 +997,7 @@ func TestSuperfloppyNamelessDirectoryKeepsItsSubtree(t *testing.T) {
 
 	var nameless, buried, found bool
 	for _, entry := range entries {
-		switch entry.GetName() {
+		switch entry.Name() {
 		case sfUnnamedDirName:
 			nameless = true
 			if !entry.HasSyntheticName() {
@@ -877,17 +1006,17 @@ func TestSuperfloppyNamelessDirectoryKeepsItsSubtree(t *testing.T) {
 			if !entry.IsDir() {
 				t.Error("the unnamed entry lost its directory attribute")
 			}
-			if entry.GetEntryCluster() != sfNamelessCluster {
+			if entry.FirstCluster() != sfNamelessCluster {
 				t.Errorf("unnamed directory cluster = %d, want %d",
-					entry.GetEntryCluster(), sfNamelessCluster)
+					entry.FirstCluster(), sfNamelessCluster)
 			}
 		case "buried.txt":
 			buried = true
 			if entry.HasSyntheticName() {
 				t.Error("buried.txt has a real name but is reported as synthetic")
 			}
-			if entry.GetSize() != 33 {
-				t.Errorf("buried.txt size = %d, want 33", entry.GetSize())
+			if entry.Size() != 33 {
+				t.Errorf("buried.txt size = %d, want 33", entry.Size())
 			}
 		}
 	}
@@ -905,8 +1034,8 @@ func TestSuperfloppyNamelessDirectoryKeepsItsSubtree(t *testing.T) {
 
 	// Every other entry on the volume has a real name and must not be flagged.
 	for _, entry := range entries {
-		if entry.GetName() != sfUnnamedDirName && entry.HasSyntheticName() {
-			t.Errorf("%q is wrongly reported as having a synthetic name", entry.GetName())
+		if entry.Name() != sfUnnamedDirName && entry.HasSyntheticName() {
+			t.Errorf("%q is wrongly reported as having a synthetic name", entry.Name())
 		}
 	}
 }

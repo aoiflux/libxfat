@@ -105,6 +105,14 @@ func (v *VBR) readSome(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
+// isEOF reports whether err is one of the two ways this package says "the image
+// ended here": io.EOF from a reader, or ErrEOF from the volume's own bounds
+// checks. Callers that tolerate a truncated tail have to accept both, and writing
+// the pair out at each of those call sites is how one of them gets forgotten.
+func isEOF(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, ErrEOF)
+}
+
 // sectionReader returns a reader over length bytes of the image starting at
 // off, bounded by the known image size when there is one.
 func (v *VBR) sectionReader(off int64, length int64) (*io.SectionReader, error) {

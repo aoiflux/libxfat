@@ -64,8 +64,8 @@ func FuzzParseDirChunk(f *testing.F) {
 			}
 		}
 
-		optimisticDeleted := newParser(true).parseDeletedDirEntries(data)
-		strictDeleted := newParser(false).parseDeletedDirEntries(data)
+		optimisticDeleted := newParser(true).parseDeletedDirEntries(unlocatedChunk, data)
+		strictDeleted := newParser(false).parseDeletedDirEntries(unlocatedChunk, data)
 
 		if len(optimisticDeleted) != len(strictDeleted) {
 			t.Fatalf("optimistic carved %d deleted entries, strict %d",
@@ -94,9 +94,9 @@ func FuzzOpen(f *testing.F) {
 			return
 		}
 		for _, entry := range entries {
-			_ = entry.GetModifiedTime()
-			_ = entry.GetTimestamps()
-			_, _, _ = fs.GetClusterList(entry)
+			_ = entry.ModifiedTime()
+			_ = entry.Timestamps()
+			_, _, _ = fs.ClusterList(entry)
 		}
 	})
 }

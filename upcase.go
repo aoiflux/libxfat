@@ -1,9 +1,7 @@
 package libxfat
 
 import (
-	"errors"
 	"fmt"
-	"io"
 	"unicode"
 	"unicode/utf16"
 )
@@ -47,22 +45,22 @@ func (e *ExFAT) ensureUpcaseTable() error {
 	}
 
 	entry := e.upcaseStream()
-	if entry.GetSize() == 0 && e.vbr.dimage != nil && e.vbr.rootDirCluster != 0 {
+	if entry.Size() == 0 && e.vbr.dimage != nil && e.vbr.rootDirCluster != 0 {
 		if _, err := e.ReadRootDir(); err != nil {
 			return err
 		}
 		entry = e.upcaseStream()
 	}
-	if entry.GetSize() == 0 {
+	if entry.Size() == 0 {
 		return ErrUpcaseTableNotFound
 	}
 
-	raw := make([]byte, 0, entry.GetSize())
+	raw := make([]byte, 0, entry.Size())
 	err := e.vbr.visitEntryData(entry, func(_ uint32, chunk []byte) error {
 		raw = append(raw, chunk...)
 		return nil
 	})
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrEOF) {
+	if err != nil && !isEOF(err) {
 		return err
 	}
 	if len(raw) < 2 {

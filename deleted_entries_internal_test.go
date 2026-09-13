@@ -42,7 +42,7 @@ func TestParseDirDetectsDeletedDirectoryEntrySet(t *testing.T) {
 	if !entry.IsDir() {
 		t.Fatal("entry should be detected as directory")
 	}
-	if got, want := entry.GetName(), "AB"+DELETED; got != want {
+	if got, want := entry.Name(), "AB"+DELETED; got != want {
 		t.Fatalf("entry name = %q, want %q", got, want)
 	}
 }
@@ -82,7 +82,7 @@ func TestParseDeletedDirEntriesScansAcrossZeroRecords(t *testing.T) {
 	clusterdata[name+4] = 'R'
 	clusterdata[name+5] = 0
 
-	entries := exfat.parseDeletedDirEntries(clusterdata)
+	entries := exfat.parseDeletedDirEntries(unlocatedChunk, clusterdata)
 	if len(entries) != 1 {
 		t.Fatalf("parseDeletedDirEntries() entries len = %d, want 1", len(entries))
 	}
@@ -166,7 +166,7 @@ func TestRecoverDeletedEntriesFromUnallocatedClusters(t *testing.T) {
 
 	found := false
 	for _, entry := range deleted {
-		if entry.GetName() == "D1"+DELETED {
+		if entry.Name() == "D1"+DELETED {
 			found = true
 			if !entry.IsDir() {
 				t.Fatal("recovered entry D1 should be a directory")

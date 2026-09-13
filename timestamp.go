@@ -99,46 +99,37 @@ func decodeTimestamp(packed uint32, tenms byte, utcOffset byte) (utc, local time
 	return local.UTC(), local, offsetValid
 }
 
-// GetModifiedTime returns the entry's last modification time in UTC, or the
+// ModifiedTime returns the entry's last modification time in UTC, or the
 // zero time if the volume records none. When the entry carries no UTC offset
-// the stored wall clock is returned as-is; use GetTimestamps to tell the two
+// the stored wall clock is returned as-is; use Timestamps to tell the two
 // cases apart.
-func (e Entry) GetModifiedTime() time.Time {
+func (e Entry) ModifiedTime() time.Time {
 	utc, _, _ := decodeTimestamp(e.modified, e.modified10ms, e.modifiedUtcOffset)
 	return utc
 }
 
-// GetCreatedTime returns the entry's creation time in UTC, or the zero time if
+// CreatedTime returns the entry's creation time in UTC, or the zero time if
 // the volume records none. This is also the entry's birth time: exFAT has no
 // separate metadata-change timestamp.
-func (e Entry) GetCreatedTime() time.Time {
+func (e Entry) CreatedTime() time.Time {
 	utc, _, _ := decodeTimestamp(e.created, e.created10ms, e.createdUtcOffset)
 	return utc
 }
 
-// GetAccessedTime returns the entry's last access time in UTC, or the zero time
+// AccessedTime returns the entry's last access time in UTC, or the zero time
 // if the volume records none. exFAT stores no sub-second precision for access,
 // so this value is always on a two-second boundary.
-func (e Entry) GetAccessedTime() time.Time {
+func (e Entry) AccessedTime() time.Time {
 	utc, _, _ := decodeTimestamp(e.accessed, 0, e.accessedUtcOffset)
 	return utc
 }
 
-// GetTimestamps returns every timestamp on the entry together with the stored
+// Timestamps returns every timestamp on the entry together with the stored
 // wall-clock readings and whether each was anchored by a recorded UTC offset.
-func (e Entry) GetTimestamps() Timestamps {
+func (e Entry) Timestamps() Timestamps {
 	var t Timestamps
 	t.Modified, t.ModifiedLocal, t.ModifiedOffsetValid = decodeTimestamp(e.modified, e.modified10ms, e.modifiedUtcOffset)
 	t.Created, t.CreatedLocal, t.CreatedOffsetValid = decodeTimestamp(e.created, e.created10ms, e.createdUtcOffset)
 	t.Accessed, t.AccessedLocal, t.AccessedOffsetValid = decodeTimestamp(e.accessed, 0, e.accessedUtcOffset)
 	return t
-}
-
-// formatTimestamp renders a decoded timestamp for display, distinguishing an
-// absent value from a real one.
-func formatTimestamp(t time.Time) string {
-	if t.IsZero() {
-		return "-"
-	}
-	return t.Format("2006-01-02 15:04:05.000 MST")
 }

@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 func main() {
@@ -36,12 +36,12 @@ func main() {
 		log.Fatalf("read root directory: %v", err)
 	}
 
-	allocatedClusters, err := exfat.GetAllocatedClusters()
+	allocatedClusters, err := exfat.AllocatedClusters()
 	if err != nil {
 		log.Fatalf("get allocated clusters: %v", err)
 	}
 
-	freeClusters, err := exfat.GetFreeClusters()
+	freeClusters, err := exfat.FreeClusters()
 	if err != nil {
 		log.Fatalf("get free clusters: %v", err)
 	}
@@ -53,14 +53,19 @@ func main() {
 		}
 	}
 
-	volumeLabel := exfat.GetVolumeLabel()
+	volumeLabel, err := exfat.VolumeLabel()
+	if err != nil {
+		log.Fatalf("read volume label: %v", err)
+	}
 	if volumeLabel == "" {
 		volumeLabel = "(none)"
 	}
 
 	fmt.Printf("Volume label: %s\n", volumeLabel)
-	fmt.Printf("Cluster size: %d bytes\n", exfat.GetClusterSize())
-	fmt.Printf("Used space: %s\n", exfat.GetUsedSpace())
+	fmt.Printf("Cluster size: %d bytes\n", exfat.ClusterSize())
+	fmt.Printf("Used space: %d%%\n", exfat.PercentInUse())
+	fmt.Printf("Serial number: %08X\n", exfat.VolumeSerialNumber())
+	fmt.Printf("Volume dirty: %v\n", exfat.VolumeDirty())
 	fmt.Printf("Allocated clusters: %d\n", allocatedClusters)
 	fmt.Printf("Free clusters: %d\n", freeClusters)
 	fmt.Printf("Root entries: %d\n", len(rootEntries))

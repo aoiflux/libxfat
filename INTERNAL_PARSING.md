@@ -37,7 +37,7 @@ Owned result structures:
 - `Entry`
 - `VBR.volumeLabel`
 - The `[]byte` returned from `readContent`
-- The cluster slice returned from `GetClusterList`
+- The cluster slice returned from `ClusterList`
 
 This split keeps exFAT internals decoupled from upward-facing VFS abstractions.
 Callers still receive stable owned values, while the parser does most internal
@@ -62,7 +62,7 @@ Intentional copy boundaries remain at:
 - UTF-16 name assembly into owned Go strings
 - Volume label decoding into an owned Go string
 - `readContent`, because its return type is an owned byte slice
-- `GetClusterList`, because its return type is an owned cluster list
+- `ClusterList`, because its return type is an owned cluster list
 
 ## Malformed-Image Resilience
 
@@ -83,7 +83,7 @@ The main remaining allocations are intentional or tied to public API shape:
 
 - `readContent` allocates `entry.dataLen` bytes for returned content.
 - Filename assembly allocates UTF-16 unit storage and the final UTF-8 string.
-- `GetClusterList` allocates a slice of cluster numbers for callers that need a
+- `ClusterList` allocates a slice of cluster numbers for callers that need a
   full list.
 - User-facing formatting helpers in `entry.go` allocate display strings.
 

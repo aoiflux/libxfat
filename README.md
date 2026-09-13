@@ -10,7 +10,13 @@ The library is read-oriented. It does not create or modify exFAT volumes.
 
 - Parse exFAT images from an `*os.File` or any `io.ReaderAt`, so the library can
   be layered directly over a decoded EWF/VHD device or a partition reader.
-- Read the root directory or recursively walk indexable entries.
+- Walk the whole tree in one cancellable pass, with paths, parent identity and a
+  cycle guard — and no filter hiding fragmented files.
+- Map any file to absolute byte ranges without reading its content, with the
+  provenance of every range reported rather than assumed.
+- Read file content in memory through `io.ReaderAt`, `io.Reader` or
+  `io.SectionReader`, clamped to the bytes actually located.
+- Safe for concurrent use: one open volume, many goroutines.
 - Extract regular files while preserving directory structure, plus the
   filesystem's own metadata streams and regions.
 - Report full MACB timestamps in UTC, anchored by the exFAT UTC offset fields.
@@ -25,9 +31,13 @@ The library is read-oriented. It does not create or modify exFAT volumes.
 
 ## Install
 
-<!-- default option, no dependency badges. -->
+```sh
+go get github.com/aoiflux/libxfat/v2
+```
 
-<!-- default option, no dependency badges. -->
+```go
+import "github.com/aoiflux/libxfat/v2"
+```
 
 </div>
 <br>
@@ -103,23 +113,36 @@ The internal parser architecture and zero-copy boundaries are documented in
 ```sh
 └── libxfat/
     ├── README.md
-    ├── xfat.go
-    ├── cluster.go
+    ├── CHANGELOG.md
+    ├── xfat.go          # package docs, Source, constructors
+    ├── chain.go         # the topology-only FAT walk
+    ├── cluster.go       # cluster traversal and content reads
     ├── const.go
-    ├── dir.go
+    ├── context.go       # cancellation pacing
+    ├── dir.go           # directory parsing entry points, extraction
     ├── dir_record.go
     ├── entry.go
-    ├── go.mod
-    ├── go.sum
+    ├── extent_reader.go # io.ReaderAt over a file's located ranges
+    ├── file.go          # OpenEntry and *File
+    ├── fragment.go      # Range, FragmentResult, the extent API
+    ├── identity.go      # FileID and entry addressing
+    ├── parser.go        # per-parse directory parser state
     ├── reader.go
     ├── struct.go
     ├── timestamp.go
+    ├── upcase.go
     ├── util.go
     ├── validators.go
-    └── vbr.go
+    ├── vbr.go
+    ├── volume.go        # volume identity and geometry accessors
+    └── walk.go          # Walk and WalkOptions
 ```
 
 The module currently targets Go 1.25 as declared in `go.mod`.
+
+Version 2 changed the module path, so the import is
+`github.com/aoiflux/libxfat/v2`. See [CHANGELOG.md](CHANGELOG.md) for what moved
+and why.
 
 ## Quick Start
 
@@ -131,7 +154,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 func main() {
@@ -153,22 +176,22 @@ func main() {
 
 	for _, entry := range rootEntries {
 		fmt.Printf("name=%q size=%d dir=%t special=%t virtual=%t\n",
-			entry.GetName(),
-			entry.GetSize(),
+			entry.Name(),
+			entry.Size(),
 			entry.IsDir(),
 			entry.IsSpecialFile(),
 			entry.IsVirtualEntry(),
 		)
 	}
 
-	allocated, err := fs.GetAllocatedClusters()
+	allocated, err := fs.AllocatedClusters()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("cluster size: %d bytes\n", fs.GetClusterSize())
+	fmt.Printf("cluster size: %d bytes\n", fs.ClusterSize())
 	fmt.Printf("allocated clusters: %d\n", allocated)
-	fmt.Printf("used space: %s\n", fs.GetUsedSpace())
+	fmt.Printf("used space: %d%%\n", fs.PercentInUse())
 }
 ```
 
@@ -244,7 +267,7 @@ called, so it is always returned and the verdict travels alongside it:
 ```go
 for _, entry := range entries {
     if err := entry.NameChecksumError(); err != nil {
-        log.Printf("unverified: %v", err)   // entry.GetName() is still populated
+        log.Printf("unverified: %v", err)   // entry.Name() is still populated
     }
 }
 ```
@@ -292,7 +315,7 @@ volume says it means:
 - `UpcaseString(s string) (string, error)` — fold through the volume's table.
 - `NameHash(name string) (uint16, error)` — the hash the volume would record.
 - `Entry.RecordedNameHash() (uint16, bool)` — the stored value.
-- `Entry.GetRawName()` — the name as recorded, without the deleted marker, the
+- `Entry.RawName()` — the name as recorded, without the deleted marker, the
   placeholder for a nameless entry, or any composed path.
 
 ### Entries With No Name
@@ -309,7 +332,7 @@ which is stable between runs and distinct between siblings, and it reports
 
 ```go
 if entry.HasSyntheticName() {
-    // GetName() is the library's invention, not a name off the volume.
+    // Name() is the library's invention, not a name off the volume.
 }
 ```
 
@@ -320,77 +343,152 @@ subtree addressable; it is not evidence.
 
 ### Open And Inspect
 
-- `New(imagefile *os.File, optimistic bool, offset ...uint64) (ExFAT, error)`
-- `NewFromReaderAt(r io.ReaderAt, size int64, optimistic bool, offset ...uint64) (ExFAT, error)`
+- `New(imagefile *os.File, optimistic bool, offset ...uint64) (*ExFAT, error)`
+- `NewFromReaderAt(r io.ReaderAt, size int64, optimistic bool, offset ...uint64) (*ExFAT, error)`
 - `Open(src Source) (*ExFAT, error)`
 - `ReadRootDir() ([]Entry, error)`
 - `ReadDir(entry Entry) ([]Entry, error)`
 - `ReadDirs(entries []Entry) ([]Entry, error)`
-- `GetAllEntries(rootEntries []Entry, indexable ...bool) ([]Entry, error)`
-- `GetFullPathIndexableEntries(entries []Entry, path string) ([]Entry, error)`
+- `AllEntries(rootEntries []Entry, indexable ...bool) ([]Entry, error)`
+- `ContiguousFiles(rootEntries []Entry) ([]Entry, error)`
+- `ContiguousFilePaths(entries []Entry, path string) ([]Entry, error)`
 
-`GetIndexableEntries` and `GetFullPathIndexableEntries` apply the same test to
-the same tree, so they select the same entries and differ only in whether paths
-are composed. The synthetic `$MBR` and `$FAT1` appear in both, at the root.
+`ContiguousFiles` and `ContiguousFilePaths` apply the same test to the same tree,
+so they select the same entries and differ only in whether paths are composed.
+The synthetic `$MBR` and `$FAT1` appear in both, at the root.
+
+Read what that test excludes before choosing either: as its name now says, it
+keeps only *contiguous* files, so **every fragmented file on the volume is
+absent**. Use `Walk` for anything that needs to see the whole tree.
+
+### Walk The Tree
+
+- `Walk(ctx context.Context, fn func(path string, parentFirstCluster uint32, entry Entry) error) error`
+- `WalkWithOptions(ctx context.Context, opts WalkOptions, fn ...) error`
+
+One pre-order, depth-first pass in disk order, with a cycle guard, a depth cap and
+a cancellable context. The path is handed to the callback rather than written into
+the entry, so `Entry.Name()` stays the bare name at every depth. Nothing is
+filtered on fragmentation. `WalkOptions` opts into deleted records
+(`IncludeDeleted`), into the surviving children of a deleted directory
+(`DescendDeletedDirectories`), and into the free-space sweep
+(`IncludeRecovered`), which reports its carvings under `RecoveredPath`.
+
+### Read File Content
+
+- `OpenEntry(entry Entry) (*File, error)`
+- `ReadEntry(entry Entry) ([]byte, error)`
+- `File`: `Read`, `ReadAt`, `ReadAll`, `WriteTo`, `Seek`, `Reader`, `ReaderAt`,
+  `SectionReader`, `Size`, `ValidSize`, `Fragments`, `Slack`, `Unwritten`
+
+Reads are clamped to the bytes actually *located*, never to the size the
+directory entry records, so a truncated or broken chain yields what is there and
+says so rather than padding.
+
+### Map File Extents
+
+- `FragmentOffsets(entry Entry) ([]Range, error)`
+- `FragmentOffsetsWithOptions(entry Entry, opts FragmentOptions) (*FragmentResult, error)`
+- `IsFragmented(entry Entry) (bool, error)`
+- `SlackRange(entry Entry) (Range, bool, error)`
+- `UnwrittenRanges(entry Entry) ([]Range, error)`
+- `IsClusterAllocated(cluster uint32) (bool, error)`
+- Free functions: `TotalLength([]Range)`, `IsFragmented([]Range)`, `Coalesce([]Range)`
+
+`Range` gives absolute byte offsets and lengths, coalesced into runs, so a
+changed-range list can be intersected against a file's extents without reading
+any file data. `FragmentResult` carries the provenance: `ChainWalked`,
+`NoFatChain`, `Assumed`, `Truncated`, `ChainBroken`, `LoopDetected`,
+`FirstClusterReallocated`, `ValidBytes`.
+
+### Identify Entries
+
+- `FileID(entry Entry) (FileID, bool)`
+- `Entry.EntrySetOffset() (int64, bool)`
+- `Entry.ParentFirstCluster()` and `Entry.EntrySlotIndex()`
+
+`FileID` is a parent cluster plus a logical slot index: stable across the parent
+directory being relocated, and explicitly best-effort. Read its documentation
+before using it for rename detection — a reused slot carries its predecessor's
+identity exactly, and no field on an exFAT volume distinguishes the two.
 
 ### Extract Data
 
 - `ExtractEntryContent(entry Entry, dstpath string) error`
-- `ExtractAllFiles(rootEntries []Entry, dstdir string) error`
+- `ExtractAllFiles(ctx context.Context, dstdir string) error`
+
+`ExtractAllFiles` walks the tree itself and writes nothing to stdout. A name that
+would resolve outside the destination directory is refused rather than followed.
 
 ### Deleted Entry Recovery
 
 - `RecoverDeletedEntries() ([]Entry, error)`
+- `RecoverDeletedEntriesContext(ctx context.Context) ([]Entry, error)`
 
 ### Volume Statistics
 
-- `GetVolumeLabel() string`
+- `VolumeLabel() (string, error)`
 - `UpcaseString(s string) (string, error)`
 - `NameHash(name string) (uint16, error)`
 - `VerifyNameHash(entry Entry) error`
-- `GetClusterSize() uint64`
-- `GetAllocatedClusters() (uint32, error)`
-- `GetFreeClusters() (uint32, error)`
-- `GetUsedSpace() string`
+- `ClusterSize() uint64`
+- `AllocatedClusters() (uint32, error)`
+- `FreeClusters() (uint32, error)`
+- `PercentInUse() byte`
 - `CountClusters(entry Entry) (int, error)`
-- `GetClusterList(entry Entry) ([]uint32, uint64, error)`
-- `GetClusterOffset(cluster uint32) uint64`
+- `ClusterList(entry Entry) ([]uint32, uint64, error)`
+- `ClusterOffset(cluster uint32) (uint64, error)`
 
-`GetClusterList` describes entries that live in the cluster heap. The synthetic
+`ClusterList` describes entries that live in the cluster heap. The synthetic
 `$MBR`, `$FAT1` and `$FAT2` entries do not, so it returns `ErrNoClusterMapping`
-for them; locate those with `entry.GetRegionOffset()` plus `entry.GetSize()`.
+for them; locate those with `entry.RegionOffset()` plus `entry.Size()`, or with
+`FragmentOffsets`, which accepts them and returns the one range they occupy.
+
+### Volume Identity And Geometry
+
+- `VolumeSerialNumber() uint32`, `FilesystemRevision() (major, minor byte)`
+- `VolumeFlags() uint16`, `ActiveFAT() int`, `VolumeDirty() bool`, `MediaFailure() bool`
+- `Base() int64`, `PartitionOffset() uint64`, `VolumeSize() uint64`
+- `BytesPerSector() uint32`, `SectorsPerCluster() uint32`, `ClusterCount() uint32`
+- `RootDirCluster() uint32`, `ClusterHeapOffset() int64`
+- `FatOffset() int64`, `FatSize() uint64`, `FatCount() byte`
+
+`VolumeDirty` is the one to read first on an acquired image: it says the volume
+was not cleanly unmounted, and so that its bitmap, directory records and FAT need
+not agree with each other.
 
 ### Entry Helpers
 
 Each parsed directory item is represented by `Entry`. Common helpers include:
 
-- `GetName()`
-- `GetSize()`
-- `GetValidDataSize()`
-- `GetEntryCluster()`
-- `GetEntryType()`
-- `GetAttributes()`
+- `Name()`
+- `Size()`
+- `ValidDataSize()`
+- `FirstCluster()`
+- `EntryType()`
+- `Attributes()`
 - `IsDir()` and `IsFile()`
 - `IsDeleted()`
-- `IsIndexed()`
+- `IsInUse()`
 - `IsSpecialFile()`
 - `IsVirtualEntry()`
 - `IsRegion()` and `IsMetadataStream()`
-- `GetRegionOffset() (uint64, bool)`
-- `HasFatChain()` and `DoesNotHaveFatChain()`
+- `RegionOffset() (uint64, bool)`
+- `IsContiguous()` — the volume recorded `NoFatChain` for this stream
+- `IsContiguousFile()` — the filter `ContiguousFiles` applies
 - `NameChecksumVerified()` and `NameChecksumMismatch()`
 - `NameChecksumError() error`
 - `EntrySetChecksums() (expected, computed uint16, checked bool)`
 - `HasSyntheticName()`
-- `GetRawName()`
+- `RawName()`
 - `RecordedNameHash() (uint16, bool)`
 
 ### Timestamps
 
-- `GetModifiedTime() time.Time`
-- `GetCreatedTime() time.Time`
-- `GetAccessedTime() time.Time`
-- `GetTimestamps() Timestamps`
+- `ModifiedTime() time.Time`
+- `CreatedTime() time.Time`
+- `AccessedTime() time.Time`
+- `Timestamps() Timestamps`
 
 All three getters return UTC, or the zero `time.Time` when the volume records
 no usable value — check `IsZero()` rather than assuming a real date.
@@ -406,11 +504,11 @@ access does not, so access times always land on a two-second boundary.
 **Stored times are wall-clock readings, not instants.** Each timestamp has a
 companion UTC offset byte, and only that byte makes the reading absolute. When
 a volume records no offset the getters return the stored wall clock as though it
-were UTC, which may be wrong by the writing system's time zone. `GetTimestamps`
+were UTC, which may be wrong by the writing system's time zone. `Timestamps`
 reports which case applies, and also returns the readings exactly as stored:
 
 ```go
-ts := entry.GetTimestamps()
+ts := entry.Timestamps()
 if ts.ModifiedOffsetValid {
     fmt.Println("anchored:", ts.Modified)          // true UTC
 } else {
@@ -450,7 +548,7 @@ synthetic entries (`$MBR`, `$FAT1`, `$FAT2`) alongside regular files:
 ```go
 for _, entry := range entries {
     if entry.IsMetadataStream() || entry.IsRegion() {
-        err := fs.ExtractEntryContent(entry, filepath.Join(outdir, entry.GetName()))
+        err := fs.ExtractEntryContent(entry, filepath.Join(outdir, entry.Name()))
         // ...
     }
 }
@@ -556,15 +654,25 @@ See `IMPROVEMENTS.md` for a more detailed implementation summary.
 ```text
 .
 |-- xfat.go           # entry point: package docs, Source, and the constructors
-|-- dir.go            # directory parsing, entry traversal, deleted-entry carving
-|-- vbr.go            # VBR parsing and volume metadata
+|-- walk.go           # Walk, WalkWithOptions, WalkOptions
+|-- context.go        # how cancellation is paced across an operation
+|-- dir.go            # directory parse entry points, extraction, deleted carving
+|-- parser.go         # dirParser: the state of one directory parse
+|-- fragment.go       # Range, FragmentResult, and the extent API
+|-- chain.go          # the FAT walk that reads only FAT entries
+|-- file.go           # OpenEntry and *File
+|-- extent_reader.go  # io.ReaderAt and io.Reader over a file's ranges
+|-- identity.go       # FileID, and an entry's own address
+|-- volume.go         # the volume's identity and geometry
+|-- vbr.go            # VBR parsing
 |-- cluster.go        # cluster traversal and content reads
 |-- reader.go         # bounds-checked reads against the backing io.ReaderAt
 |-- dir_record.go     # 32-byte directory record view
-|-- entry.go          # directory-entry formatting helpers
+|-- entry.go          # the contiguous-file filter
+|-- upcase.go         # up-case table and name hashing
 |-- timestamp.go      # exFAT timestamp decoding
 |-- struct.go         # core ExFAT, VBR, and Entry types
-|-- util.go           # shared parsing and formatting helpers
+|-- util.go           # shared parsing helpers
 |-- validators.go     # exFAT directory-record validation helpers
 |-- examples/         # runnable example programs
 `-- tests/            # higher-level behavioral tests

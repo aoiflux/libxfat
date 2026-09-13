@@ -1,9 +1,9 @@
 package libxfat
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,9 +35,9 @@ func (e *ExFAT) ensureBitmapEntry() error {
 	return nil
 }
 
-// GetAllocatedClusters function is experimental, it may not work correctly all the time
+// AllocatedClusters function is experimental, it may not work correctly all the time
 // It has been tested to work correctly if used directly after parsing root entries
-func (e *ExFAT) GetAllocatedClusters() (uint32, error) {
+func (e *ExFAT) AllocatedClusters() (uint32, error) {
 	if err := e.ensureBitmapEntry(); err != nil {
 		return 0, ErrAllocationBitmapNotFound
 	}
@@ -47,17 +47,17 @@ func (e *ExFAT) GetAllocatedClusters() (uint32, error) {
 		counter.write(chunk)
 		return nil
 	})
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrEOF) {
+	if err != nil && !isEOF(err) {
 		return 0, err
 	}
 	allocatedClusters := counter.count()
 	return allocatedClusters, nil
 }
 
-// GetFreeClusters function is experimental, it may not work correctly all the time
+// FreeClusters function is experimental, it may not work correctly all the time
 // It has been tested to work correctly if used directly after parsing root entries
-func (e *ExFAT) GetFreeClusters() (uint32, error) {
-	allocatedClusters, err := e.GetAllocatedClusters()
+func (e *ExFAT) FreeClusters() (uint32, error) {
+	allocatedClusters, err := e.AllocatedClusters()
 	if err != nil {
 		return 0, err
 	}
@@ -65,7 +65,7 @@ func (e *ExFAT) GetFreeClusters() (uint32, error) {
 	return freeClusters, nil
 }
 
-func (e *ExFAT) GetClusterSize() uint64 {
+func (e *ExFAT) ClusterSize() uint64 {
 	return e.vbr.clusterSize
 }
 
@@ -106,22 +106,93 @@ func (e *ExFAT) ExtractEntryContent(entry Entry, dstpath string) error {
 	// not the whole of what the entry claims.
 	if located, err := file.Located(); err == nil && located < file.Size() {
 		return fmt.Errorf("%w: %d of %d bytes recoverable for %q",
-			ErrTruncatedChain, located, file.Size(), entry.GetName())
+			ErrTruncatedChain, located, file.Size(), entry.Name())
 	}
 	return nil
 }
 
-func (e *ExFAT) ExtractAllFiles(rootEntries []Entry, dstdir string) error {
-	err := e.getAllEntriesInfo(rootEntries, "/", dstdir, false, false, true)
+// ExtractAllFiles writes every file in the volume's live directory tree to dstdir,
+// reproducing the directory structure beneath it.
+//
+// It walks the tree once and streams each file straight from its located extents, so
+// nothing is buffered whole and no entry is read twice. Deleted entries are not
+// extracted: their clusters may already belong to another file, and writing them out
+// as though they were the named file's content would be a fabrication. Use
+// OpenEntry, or ExtractEntryContent, on a specific deleted entry when that is what
+// you want, and read FragmentResult's flags to see what the bytes are worth.
+//
+// A file whose chain is broken or truncated is written as far as it could be located
+// and then reported: the first such failure is returned after the walk completes, so
+// one damaged file does not cost the rest of the volume. Everything extractable is
+// extracted whatever this returns.
+//
+// This prints nothing. It used to write every entry it touched to stdout and "Done!"
+// at the end, which made it unusable from anything that had its own output.
+func (e *ExFAT) ExtractAllFiles(ctx context.Context, dstdir string) error {
+	var firstFailure error
+
+	err := e.Walk(ctx, func(path string, _ uint32, entry Entry) error {
+		target, ok := extractionTarget(dstdir, path)
+		if !ok {
+			// A name the volume recorded resolved outside dstdir. Skipping it is
+			// not a silent loss: the entry is still reported by Walk, and
+			// ExtractEntryContent will write it wherever the caller chooses.
+			if firstFailure == nil {
+				firstFailure = fmt.Errorf("%w: %q resolves outside the destination", ErrOutOfBounds, path)
+			}
+			return nil
+		}
+
+		switch {
+		case entry.IsDir():
+			return os.MkdirAll(target, 0o755)
+		case !entry.IsValid(), !entry.IsInUse():
+			return nil
+		}
+
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := e.ExtractEntryContent(entry, target); err != nil && firstFailure == nil {
+			firstFailure = fmt.Errorf("%s: %w", path, err)
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-
-	fmt.Println("Done!")
-	return nil
+	return firstFailure
 }
 
-// GetFullPathIndexableEntries walks the tree below entries and returns the
+// extractionTarget maps a walk path onto a path beneath dstdir, and reports
+// whether it stayed there.
+//
+// A name on an exFAT volume is whatever the records say it is. On a hostile or
+// merely damaged image that can be "..", or a string of them, and joining such a
+// name onto an output directory walks back out of it - so an extraction of an image
+// could write anywhere the process can write. The names are the evidence; refusing
+// to follow them out of the destination is the library's job.
+//
+// The leading separator is stripped first because a walk path is always absolute
+// and slash-separated, and joining an absolute path is not what is wanted here.
+func extractionTarget(dstdir, walkPath string) (string, bool) {
+	relative := filepath.Clean(filepath.FromSlash(strings.Trim(walkPath, "/")))
+	if relative == "." || filepath.IsAbs(relative) {
+		return "", false
+	}
+
+	target := filepath.Join(dstdir, relative)
+
+	// Clean has already collapsed any interior "..", so anything still climbing
+	// out shows up here as a relative path that starts with one.
+	back, err := filepath.Rel(dstdir, target)
+	if err != nil || back == ".." || strings.HasPrefix(back, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return target, true
+}
+
+// ContiguousFilePaths walks the tree below entries and returns the
 // indexable ones with their full paths composed, prefixed by path.
 //
 // Both decisions it makes about an entry - whether to index it, and whether to
@@ -129,8 +200,8 @@ func (e *ExFAT) ExtractAllFiles(rootEntries []Entry, dstdir string) error {
 // entries identify themselves by name, so "$MBR" turned into "/$MBR" stops
 // answering to IsVirtualEntry and reads as an ordinary invalid entry: composing
 // the path first silently dropped $MBR and $FAT1 from the results, which is why
-// this returned two fewer entries than GetIndexableEntries on the same volume.
-func (e *ExFAT) GetFullPathIndexableEntries(entries []Entry, path string) ([]Entry, error) {
+// this returned two fewer entries than ContiguousFiles on the same volume.
+func (e *ExFAT) ContiguousFilePaths(entries []Entry, path string) ([]Entry, error) {
 	// Most entries on a volume are indexable, so this level is the best estimate
 	// of the result available before the walk. Seeding from it turns the dozen
 	// doubling reallocations of a large directory into one, and costs at worst a
@@ -142,7 +213,7 @@ func (e *ExFAT) GetFullPathIndexableEntries(entries []Entry, path string) ([]Ent
 	}
 
 	for _, entry := range entries {
-		indexable := entry.IsIndexable()
+		indexable := entry.IsContiguousFile()
 
 		subentries, err := e.ReadDir(entry)
 		if err != nil {
@@ -162,7 +233,7 @@ func (e *ExFAT) GetFullPathIndexableEntries(entries []Entry, path string) ([]Ent
 			continue
 		}
 
-		tempRet, err := e.GetFullPathIndexableEntries(subentries, entry.name+"/")
+		tempRet, err := e.ContiguousFilePaths(subentries, entry.name+"/")
 		if err != nil {
 			return nil, err
 		}
@@ -172,61 +243,13 @@ func (e *ExFAT) GetFullPathIndexableEntries(entries []Entry, path string) ([]Ent
 	return retentries, nil
 }
 
-func (e *ExFAT) ShowAllEntriesInfo(rootEntries []Entry, path string, long, simple bool) error {
-	return e.getAllEntriesInfo(rootEntries, path, "", long, simple, false)
-}
-
-func (e *ExFAT) getAllEntriesInfo(entries []Entry, path, dstdir string, long, simple, extract bool) error {
-	for _, entry := range entries {
-		err := e.processEntry(entry, path, dstdir, extract, long, simple)
-		if err != nil {
-			return err
-		}
-
-		subentries, err := e.ReadDir(entry)
-		if err != nil {
-			return err
-		}
-
-		err = e.getAllEntriesInfo(subentries, path+entry.name+"/", dstdir, long, simple, extract)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (e *ExFAT) processEntry(entry Entry, path, dstdir string, extract, long, simple bool) error {
-	if extract {
-		relDir := strings.Trim(path, "/\\")
-		dstpath := filepath.Join(dstdir, filepath.FromSlash(relDir), entry.name)
-
-		if !entry.IsValid() || !entry.IsIndexed() {
-			return nil
-		}
-		if entry.IsDir() {
-			return os.MkdirAll(dstpath, 0o755)
-		}
-		if err := os.MkdirAll(filepath.Dir(dstpath), 0o755); err != nil {
-			return err
-		}
-		return e.ExtractEntryContent(entry, dstpath)
-	}
-
-	entryString := getDirEntry(entry, path, long, simple)
-	fmt.Println(entryString)
-
-	return nil
+// limit - 2,14,74,83,646 entries
+func (e *ExFAT) ContiguousFiles(rootEntries []Entry) ([]Entry, error) {
+	return e.AllEntries(rootEntries, true)
 }
 
 // limit - 2,14,74,83,646 entries
-func (e *ExFAT) GetIndexableEntries(rootEntries []Entry) ([]Entry, error) {
-	return e.GetAllEntries(rootEntries, true)
-}
-
-// limit - 2,14,74,83,646 entries
-func (e *ExFAT) GetAllEntries(rootEntries []Entry, indexable ...bool) ([]Entry, error) {
+func (e *ExFAT) AllEntries(rootEntries []Entry, indexable ...bool) ([]Entry, error) {
 	var flag bool
 	var err error
 	subEntries := rootEntries
@@ -250,7 +273,7 @@ func (e *ExFAT) GetAllEntries(rootEntries []Entry, indexable ...bool) ([]Entry, 
 		}
 
 		for _, subEntry := range subEntries {
-			if flag && subEntry.IsNotIndexable() {
+			if flag && !subEntry.IsContiguousFile() {
 				continue
 			}
 			allEntries = append(allEntries, subEntry)
@@ -284,7 +307,7 @@ func (e *ExFAT) ReadDir(entry Entry) ([]Entry, error) {
 		return nil, nil
 	}
 	entries, err := e.readDirEntries(entry)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrEOF) {
+	if err != nil && !isEOF(err) {
 		return nil, err
 	}
 	return entries, err
@@ -302,7 +325,30 @@ func (e *ExFAT) ReadRootDir() ([]Entry, error) {
 // RecoverDeletedEntries scans unallocated clusters and attempts to parse
 // deleted exFAT file entry sets (0x05/0x40/0x41), similar to TSK-style
 // orphan/deleted discovery.
+//
+// It reads every unallocated cluster on the volume and cannot be interrupted; on
+// a large mostly-empty image that is a long time to hold a caller. Use
+// RecoverDeletedEntriesContext to be able to stop.
 func (e *ExFAT) RecoverDeletedEntries() ([]Entry, error) {
+	return e.recoverDeleted(&scanProgress{ctx: context.Background()})
+}
+
+// RecoverDeletedEntriesContext is RecoverDeletedEntries, stoppable.
+//
+// Cancelling ctx abandons the sweep and returns ctx.Err(); the entries carved so
+// far are discarded rather than returned, because a partial sweep of a volume's
+// free space is not a partial answer to "what was deleted here" - it is an
+// unstated subset of it, and a caller cannot tell which. Walk with
+// IncludeRecovered reports each carving as it is found, for callers that want the
+// partial result.
+func (e *ExFAT) RecoverDeletedEntriesContext(ctx context.Context) ([]Entry, error) {
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+	return e.recoverDeleted(&scanProgress{ctx: ctx})
+}
+
+func (e *ExFAT) recoverDeleted(prog *scanProgress) ([]Entry, error) {
 	unallocated, err := e.getUnallocatedClusters()
 	if err != nil {
 		return nil, err
@@ -328,12 +374,16 @@ func (e *ExFAT) RecoverDeletedEntries() ([]Entry, error) {
 	parser := newDirParser(&e.vbr, e.optimistic, e.rejectChecksumMismatch)
 
 	for _, cluster := range unallocated {
+		if err := prog.check(); err != nil {
+			return nil, err
+		}
+
 		buf := state.ensureBuf(&e.vbr)
 		if err := e.vbr.readClusterInto(cluster, buf); err != nil {
 			return nil, err
 		}
 		parser.resetDirParser()
-		deleted = append(deleted, parser.parseDeletedDirEntries(buf)...)
+		deleted = append(deleted, parser.parseDeletedDirEntries(cluster, buf)...)
 	}
 
 	return deleted, nil
@@ -364,7 +414,7 @@ func (e *ExFAT) getUnallocatedClusters() ([]uint32, error) {
 	if errors.Is(err, errStopClusterWalk) {
 		return unallocated, nil
 	}
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrEOF) {
+	if err != nil && !isEOF(err) {
 		return nil, err
 	}
 
@@ -375,28 +425,39 @@ func (e *ExFAT) CountClusters(entry Entry) (int, error) {
 	return e.vbr.countClusters(entry)
 }
 
-// GetClusterList method returns a list of all the clusters in a file
+// ClusterList method returns a list of all the clusters in a file
 // end index of the last byte in the last cluster of the file
-func (e *ExFAT) GetClusterList(entry Entry) ([]uint32, uint64, error) {
+func (e *ExFAT) ClusterList(entry Entry) ([]uint32, uint64, error) {
 	return e.vbr.getClusterList(entry)
 }
-func (e *ExFAT) GetClusterOffset(cluster uint32) uint64 {
-	return e.vbr.getClusterOffset(cluster)
-}
 
-func (e *ExFAT) GetUsedSpace() string {
-	return fmt.Sprintf("%d%%", e.vbr.percentInUse)
+// ClusterOffset is the absolute image offset of the first byte of cluster.
+//
+// It refuses a cluster number the volume cannot address rather than computing an
+// offset from it. exFAT has no cluster 0 or 1, and the arithmetic for cluster 0
+// yields the start of the cluster heap minus two clusters - an offset that lands in
+// the FAT, or before the start of the volume, and that a caller receives looking
+// exactly like an answer. Producing offsets that refer to nothing is the failure
+// mode this library exists to avoid.
+//
+// The offset includes Base, so it indexes the image the volume was opened over.
+func (e *ExFAT) ClusterOffset(cluster uint32) (uint64, error) {
+	if !e.vbr.isValidCluster(cluster) {
+		return 0, fmt.Errorf("%w: %d", ErrInvalidCluster, cluster)
+	}
+	return e.vbr.getClusterOffset(cluster), nil
 }
 
 func (e *ExFAT) readDirEntries(entry Entry) ([]Entry, error) {
 	var entries []Entry
 	done := false
 	parser := newDirParser(&e.vbr, e.optimistic, e.rejectChecksumMismatch)
-	err := e.vbr.visitEntryData(entry, func(_ uint32, chunk []byte) error {
+	parser.inDirectory(entry.entryCluster)
+	err := e.vbr.visitEntryData(entry, func(cluster uint32, chunk []byte) error {
 		if done {
 			return nil
 		}
-		if parser.parseDirChunk(chunk, &entries) {
+		if parser.parseDirChunk(cluster, chunk, &entries) {
 			done = true
 		}
 		return nil
@@ -412,11 +473,12 @@ func (e *ExFAT) readRootDirEntries() ([]Entry, error) {
 	var entries []Entry
 	done := false
 	parser := newDirParser(&e.vbr, e.optimistic, e.rejectChecksumMismatch)
-	err := e.vbr.visitFatChain(e.vbr.rootDirCluster, func(_ uint32, chunk []byte) error {
+	parser.inDirectory(e.vbr.rootDirCluster)
+	err := e.vbr.visitFatChain(e.vbr.rootDirCluster, func(cluster uint32, chunk []byte) error {
 		if done {
 			return nil
 		}
-		if parser.parseDirChunk(chunk, &entries) {
+		if parser.parseDirChunk(cluster, chunk, &entries) {
 			done = true
 		}
 		return nil

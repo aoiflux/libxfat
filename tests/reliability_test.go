@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 func TestReadRootDirAcceptsEOFClusterRange(t *testing.T) {
@@ -47,17 +47,17 @@ func TestAllocatedAndFreeClustersFromShortBitmap(t *testing.T) {
 		t.Fatalf("ReadRootDir error: %v", err)
 	}
 
-	allocated, err := exfat.GetAllocatedClusters()
+	allocated, err := exfat.AllocatedClusters()
 	if err != nil {
-		t.Fatalf("GetAllocatedClusters error: %v", err)
+		t.Fatalf("AllocatedClusters error: %v", err)
 	}
 	if allocated != 2 {
 		t.Fatalf("allocated clusters = %d, want 2", allocated)
 	}
 
-	free, err := exfat.GetFreeClusters()
+	free, err := exfat.FreeClusters()
 	if err != nil {
-		t.Fatalf("GetFreeClusters error: %v", err)
+		t.Fatalf("FreeClusters error: %v", err)
 	}
 	if free != 2 {
 		t.Fatalf("free clusters = %d, want 2", free)

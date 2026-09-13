@@ -134,7 +134,7 @@ func buildDir(sets ...[]byte) []byte {
 func entryNames(entries []Entry) []string {
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		names = append(names, entry.GetName())
+		names = append(names, entry.Name())
 	}
 	return names
 }
@@ -174,23 +174,23 @@ func TestParseDirStrictPreservesNames(t *testing.T) {
 	}
 
 	for i, entry := range entries {
-		if entry.GetName() != testSets[i].name {
-			t.Errorf("entry %d name = %q, want %q", i, entry.GetName(), testSets[i].name)
+		if entry.Name() != testSets[i].name {
+			t.Errorf("entry %d name = %q, want %q", i, entry.Name(), testSets[i].name)
 		}
 		if !entry.NameChecksumVerified() {
-			t.Errorf("entry %d (%q) did not verify", i, entry.GetName())
+			t.Errorf("entry %d (%q) did not verify", i, entry.Name())
 		}
 		if entry.NameChecksumMismatch() {
-			t.Errorf("entry %d (%q) reports a mismatch", i, entry.GetName())
+			t.Errorf("entry %d (%q) reports a mismatch", i, entry.Name())
 		}
 		if err := entry.NameChecksumError(); err != nil {
-			t.Errorf("entry %d (%q) NameChecksumError = %v, want nil", i, entry.GetName(), err)
+			t.Errorf("entry %d (%q) NameChecksumError = %v, want nil", i, entry.Name(), err)
 		}
-		if entry.GetEntryCluster() != testSets[i].cluster {
-			t.Errorf("entry %d cluster = %d, want %d", i, entry.GetEntryCluster(), testSets[i].cluster)
+		if entry.FirstCluster() != testSets[i].cluster {
+			t.Errorf("entry %d cluster = %d, want %d", i, entry.FirstCluster(), testSets[i].cluster)
 		}
-		if entry.GetSize() != testSets[i].size {
-			t.Errorf("entry %d size = %d, want %d", i, entry.GetSize(), testSets[i].size)
+		if entry.Size() != testSets[i].size {
+			t.Errorf("entry %d size = %d, want %d", i, entry.Size(), testSets[i].size)
 		}
 	}
 }
@@ -226,13 +226,13 @@ func TestParseDirOptimisticReportsNoVerdict(t *testing.T) {
 
 	for _, entry := range entries {
 		if entry.NameChecksumVerified() {
-			t.Errorf("%q claims verification in optimistic mode", entry.GetName())
+			t.Errorf("%q claims verification in optimistic mode", entry.Name())
 		}
 		if entry.NameChecksumMismatch() {
-			t.Errorf("%q claims a mismatch in optimistic mode", entry.GetName())
+			t.Errorf("%q claims a mismatch in optimistic mode", entry.Name())
 		}
 		if _, _, checked := entry.EntrySetChecksums(); checked {
-			t.Errorf("%q reports the checksum as checked in optimistic mode", entry.GetName())
+			t.Errorf("%q reports the checksum as checked in optimistic mode", entry.Name())
 		}
 	}
 }
@@ -256,8 +256,8 @@ func TestParseDirChecksumMismatchKeepsName(t *testing.T) {
 	}
 
 	damaged := entries[1]
-	if damaged.GetName() != "damaged.txt" {
-		t.Fatalf("damaged entry name = %q, want %q", damaged.GetName(), "damaged.txt")
+	if damaged.Name() != "damaged.txt" {
+		t.Fatalf("damaged entry name = %q, want %q", damaged.Name(), "damaged.txt")
 	}
 	if !damaged.NameChecksumMismatch() {
 		t.Error("damaged entry does not report a mismatch")
@@ -299,8 +299,8 @@ func TestParseDirRejectChecksumMismatchDropsEntry(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("parsed %d entries, want 1", len(entries))
 	}
-	if entries[0].GetName() != "intact.txt" {
-		t.Fatalf("surviving entry = %q, want %q", entries[0].GetName(), "intact.txt")
+	if entries[0].Name() != "intact.txt" {
+		t.Fatalf("surviving entry = %q, want %q", entries[0].Name(), "intact.txt")
 	}
 }
 
@@ -319,13 +319,13 @@ func TestParseDirEntrySetSpanningChunks(t *testing.T) {
 		var entries []Entry
 		parser := newTestParser(true)
 		parser.resetDirParser()
-		parser.parseDirChunk(set[:split], &entries)
-		parser.parseDirChunk(buildDir(set[split:]), &entries)
+		parser.parseDirChunk(unlocatedChunk, set[:split], &entries)
+		parser.parseDirChunk(unlocatedChunk, buildDir(set[split:]), &entries)
 
 		if len(entries) != 1 {
 			t.Fatalf("split at %d: parsed %d entries, want 1", split, len(entries))
 		}
-		if got := entries[0].GetName(); got != "a-name-long-enough-to-span-several-name-records.txt" {
+		if got := entries[0].Name(); got != "a-name-long-enough-to-span-several-name-records.txt" {
 			t.Errorf("split at %d: name = %q", split, got)
 		}
 		if !entries[0].NameChecksumVerified() {
@@ -354,7 +354,7 @@ func TestParseDirIgnoresStrayNameRecord(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("parsed %d entries, want 1", len(entries))
 	}
-	if got := entries[0].GetName(); got != "real.txt" {
+	if got := entries[0].Name(); got != "real.txt" {
 		t.Fatalf("name = %q, want %q", got, "real.txt")
 	}
 	if !entries[0].NameChecksumVerified() {
@@ -413,14 +413,14 @@ func TestParseDirTruncatesNameToRecordedLength(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("parsed %d entries, want 1", len(entries))
 	}
-	if got := entries[0].GetName(); got != name {
+	if got := entries[0].Name(); got != name {
 		t.Fatalf("name = %q, want %q: padding past NameLength leaked into the name", got, name)
 	}
 	if !entries[0].NameChecksumVerified() {
 		t.Error("the padded set did not verify; the padding must be part of the checksum")
 	}
-	if got, want := entries[0].GetNameLength(), byte(len(name)); got != want {
-		t.Errorf("GetNameLength() = %d, want %d", got, want)
+	if got, want := entries[0].NameLength(), byte(len(name)); got != want {
+		t.Errorf("NameLength() = %d, want %d", got, want)
 	}
 }
 
@@ -443,7 +443,7 @@ func TestParseDirTruncationSurvivesRecordBoundaries(t *testing.T) {
 		if len(entries) != 1 {
 			t.Fatalf("length %d: parsed %d entries, want 1", length, len(entries))
 		}
-		if got := entries[0].GetName(); got != name {
+		if got := entries[0].Name(); got != name {
 			t.Fatalf("length %d: name = %q, want %q", length, got, name)
 		}
 	}
@@ -466,7 +466,7 @@ func TestParseDirSubstitutesPlaceholderForNamelessSet(t *testing.T) {
 	}
 
 	nameless := entries[0]
-	if got, want := nameless.GetName(), UNNAMED+"-42"; got != want {
+	if got, want := nameless.Name(), UNNAMED+"-42"; got != want {
 		t.Fatalf("nameless entry name = %q, want %q", got, want)
 	}
 	if !nameless.HasSyntheticName() {
@@ -503,13 +503,13 @@ func TestParseDirPlaceholderIsStableAndDistinct(t *testing.T) {
 	if len(first) != 2 {
 		t.Fatalf("parsed %d entries, want 2", len(first))
 	}
-	if first[0].GetName() == first[1].GetName() {
-		t.Fatalf("both nameless siblings are called %q", first[0].GetName())
+	if first[0].Name() == first[1].Name() {
+		t.Fatalf("both nameless siblings are called %q", first[0].Name())
 	}
 	for i := range first {
-		if first[i].GetName() != second[i].GetName() {
+		if first[i].Name() != second[i].Name() {
 			t.Errorf("entry %d: %q on the first pass, %q on the second",
-				i, first[i].GetName(), second[i].GetName())
+				i, first[i].Name(), second[i].Name())
 		}
 	}
 }
@@ -525,11 +525,11 @@ func TestParseDirDeletedSetKeepsNameInStrictMode(t *testing.T) {
 		deleted: true,
 	})
 
-	entries := newTestParser(true).parseDeletedDirEntries(buildDir(set))
+	entries := newTestParser(true).parseDeletedDirEntries(unlocatedChunk, buildDir(set))
 	if len(entries) != 1 {
 		t.Fatalf("parsed %d deleted entries, want 1", len(entries))
 	}
-	if got, want := entries[0].GetName(), "erased.txt"+DELETED; got != want {
+	if got, want := entries[0].Name(), "erased.txt"+DELETED; got != want {
 		t.Fatalf("name = %q, want %q", got, want)
 	}
 	if !entries[0].NameChecksumVerified() {

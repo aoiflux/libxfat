@@ -2,7 +2,6 @@ package libxfat
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -10,55 +9,70 @@ import (
 func TestGetAllocatedClustersWithoutBitmapFails(t *testing.T) {
 	exfat := ExFAT{}
 
-	_, err := exfat.GetAllocatedClusters()
+	_, err := exfat.AllocatedClusters()
 	if !errors.Is(err, ErrAllocationBitmapNotFound) {
-		t.Fatalf("GetAllocatedClusters() error = %v, want ErrAllocationBitmapNotFound", err)
+		t.Fatalf("AllocatedClusters() error = %v, want ErrAllocationBitmapNotFound", err)
 	}
 }
 
-func TestProcessEntryExtractPreservesRelativePath(t *testing.T) {
-	imagePath := filepath.Join(t.TempDir(), "content.bin")
-	image, err := os.Create(imagePath)
-	if err != nil {
-		t.Fatalf("create image: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = image.Close()
-	})
+// TestExtractionTargetStaysBeneathTheDestination is the guard against a crafted
+// image writing outside the output directory.
+//
+// A directory or file name on an exFAT volume is whatever its name records say, so
+// ".." is a name a hostile image can record, and joining it onto an output
+// directory climbs out. The names are still reported by Walk; what is refused is
+// following them out of the destination.
+func TestExtractionTargetStaysBeneathTheDestination(t *testing.T) {
+	dst := filepath.Join(string(filepath.Separator), "out")
 
-	if _, err := image.Write([]byte("payload!!")); err != nil {
-		t.Fatalf("write image: %v", err)
-	}
-	if _, err := image.Seek(0, 0); err != nil {
-		t.Fatalf("rewind image: %v", err)
-	}
+	for _, tc := range []struct {
+		path string
+		want string // "" means the path must be refused
+	}{
+		{"/child.txt", filepath.Join(dst, "child.txt")},
+		{"/nested/dir/child.txt", filepath.Join(dst, "nested", "dir", "child.txt")},
+		{"/nested/dir/", filepath.Join(dst, "nested", "dir")},
 
-	exfat := ExFAT{
-		vbr: VBR{
-			dimage:        image,
-			clusterSize:   8,
-			nbClusters:    4,
-			dataAreaStart: 0,
-		},
-	}
-	entry := Entry{
-		etype:        EXFAT_DIRRECORD_FILEDIR,
-		name:         "child.txt",
-		dataLen:      7,
-		entryCluster: 2,
-		noFatChain:   true,
-	}
+		// A name that is literally "..", at every position it can appear in.
+		{"/../escaped.txt", ""},
+		{"/../../escaped.txt", ""},
+		{"/nested/../../escaped.txt", ""},
+		{"/..", ""},
 
-	outDir := t.TempDir()
-	if err := exfat.processEntry(entry, "/nested/dir/", outDir, true, false, false); err != nil {
-		t.Fatalf("processEntry() error = %v", err)
+		// The root itself, and anything that resolves to the destination, is not a
+		// file to write.
+		{"/", ""},
+		{"", ""},
+	} {
+		got, ok := extractionTarget(dst, tc.path)
+		if tc.want == "" {
+			if ok {
+				t.Errorf("extractionTarget(%q) = %q, want refusal", tc.path, got)
+			}
+			continue
+		}
+		if !ok {
+			t.Errorf("extractionTarget(%q) was refused, want %q", tc.path, tc.want)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("extractionTarget(%q) = %q, want %q", tc.path, got, tc.want)
+		}
 	}
+}
 
-	data, err := os.ReadFile(filepath.Join(outDir, "nested", "dir", "child.txt"))
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
+// TestExtractionTargetKeepsInteriorDotDotNames checks that a "..", once collapsed
+// by Clean, cannot cancel out a legitimate directory and land somewhere the tree
+// does not describe. "/a/../b.txt" would extract as "b.txt" directly under the
+// destination, which is not where the volume says the file is.
+func TestExtractionTargetKeepsInteriorDotDotNames(t *testing.T) {
+	dst := filepath.Join(string(filepath.Separator), "out")
+
+	got, ok := extractionTarget(dst, "/a/../b.txt")
+	if !ok {
+		t.Fatal("extractionTarget refused a path that stays inside the destination")
 	}
-	if string(data) != "payload" {
-		t.Fatalf("extracted file contents = %q, want %q", string(data), "payload")
+	if want := filepath.Join(dst, "b.txt"); got != want {
+		t.Errorf("extractionTarget = %q, want %q", got, want)
 	}
 }

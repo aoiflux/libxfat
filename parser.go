@@ -39,10 +39,30 @@ type dirParser struct {
 	setInUse         bool
 	sawStream        bool
 
+	// Where the bytes being parsed live, so that an entry can carry its own
+	// address rather than leaving the caller to reconstruct one.
+	//
+	// parentCluster describes the directory and outlives the whole parse;
+	// chunkCluster and slotBase describe the chunk currently in hand and advance
+	// with it. A fragmented directory needs no special handling here: the cluster
+	// is whichever one the chain walk actually reached, so an offset derived from
+	// it is where the bytes are rather than where a contiguous directory would
+	// have put them.
+	parentCluster uint32
+	chunkCluster  uint32
+	slotBase      uint32
+
 	// out collects what the parse learned about the volume rather than about any
 	// one entry.
 	out parseOutputs
 }
+
+// unlocatedChunk is what a caller passes for a chunk it cannot place on the
+// image - a hand-built test fixture, or a buffer assembled from somewhere other
+// than the cluster heap. Cluster 0 is not addressable on exFAT, where the heap
+// starts at 2, so it cannot be mistaken for a real location: entries parsed from
+// such a chunk report no entry-set offset, rather than a plausible wrong one.
+const unlocatedChunk uint32 = 0
 
 // parseOutputs are the facts a directory parse discovers about the volume itself:
 // its label, and where its $BitMap and $UpCase streams live.
@@ -81,7 +101,45 @@ func (p *dirParser) resetDirParser() {
 	p.offset = 0
 	p.remainingSC = 0
 	p.entryState = ENTRY_STATE_START
+	p.chunkCluster = unlocatedChunk
+	p.slotBase = 0
 	p.resetSetAssembly()
+}
+
+// inDirectory names the directory whose contents the parser is about to read, so
+// that the entries it yields can name their parent.
+//
+// It is deliberately not part of resetDirParser: which directory is being read is
+// a property of the whole parse, while the chunk position resets with every
+// chunk, and RecoverDeletedEntries resets between clusters that have no parent
+// directory at all.
+func (p *dirParser) inDirectory(firstCluster uint32) {
+	p.parentCluster = firstCluster
+}
+
+// recordOffset is the absolute image offset of the record under the parser's
+// cursor, or zero when the chunk in hand was not placed on the image.
+func (p *dirParser) recordOffset() int64 {
+	if !p.v.isValidCluster(p.chunkCluster) {
+		return 0
+	}
+	base, err := safeInt64(p.v.getClusterOffset(p.chunkCluster))
+	if err != nil {
+		return 0
+	}
+	return base + int64(p.offset)
+}
+
+// addressRecord stamps the address of the record under the cursor onto entry.
+//
+// The slot index is logical - a count of 32-byte slots from the start of the
+// directory - and so survives the parent directory being relocated, which the
+// absolute offset does not. Both are recorded because they answer different
+// questions: one identifies the entry, the other says where to go and read it.
+func (p *dirParser) addressRecord(entry *Entry) {
+	entry.parentFirstCluster = p.parentCluster
+	entry.entrySlotIndex = p.slotBase + uint32(p.offset/EXFAT_DIRRECORD_SIZE)
+	entry.entrySetOffset = p.recordOffset()
 }
 
 func (p *dirParser) resetSetAssembly() {
@@ -183,16 +241,27 @@ func (p *dirParser) clearParsedEntry() {
 	p.resetSetAssembly()
 }
 
+// parseDir parses a single directory chunk that the caller cannot place on the
+// image. Entries it yields carry no entry-set offset; see unlocatedChunk.
 func (p *dirParser) parseDir(clusterdata []byte) []Entry {
 	var entries []Entry
 	p.resetDirParser()
-	p.parseDirChunk(clusterdata, &entries)
+	p.parseDirChunk(unlocatedChunk, clusterdata, &entries)
 	return entries
 }
 
-func (p *dirParser) parseDeletedDirEntries(clusterdata []byte) []Entry {
+// parseDeletedDirEntries carves file entry sets out of the cluster numbered
+// cluster, which is expected to be unallocated.
+//
+// The entries it yields are addressed but not identified: cluster says where
+// their records are, while the directory that listed them is gone, so they have
+// no parent and no slot index that would mean anything. FileID refuses them for
+// exactly that reason.
+func (p *dirParser) parseDeletedDirEntries(cluster uint32, clusterdata []byte) []Entry {
 	var entries []Entry
 	p.resetDirParser()
+	p.parentCluster = 0
+	p.chunkCluster = cluster
 
 	for offset := 0; offset+EXFAT_DIRRECORD_SIZE <= len(clusterdata); offset += EXFAT_DIRRECORD_SIZE {
 		rec, ok := newDirRecordView(clusterdata, offset)
@@ -256,8 +325,15 @@ func (p *dirParser) parseDeletedDirEntries(clusterdata []byte) []Entry {
 	return entries
 }
 
-func (p *dirParser) parseDirChunk(clusterdata []byte, entries *[]Entry) bool {
+// parseDirChunk parses one chunk of a directory, read from the cluster numbered
+// cluster, and reports whether the end of the directory was reached.
+//
+// Successive calls continue one directory, so the slot index keeps counting
+// across the chunk boundary. It advances only on the path that runs off the end
+// of the chunk, since the other two mean there is no next chunk to number.
+func (p *dirParser) parseDirChunk(cluster uint32, clusterdata []byte, entries *[]Entry) bool {
 	p.offset = 0
+	p.chunkCluster = cluster
 
 	for p.offset < len(clusterdata) {
 		if clusterdata[p.offset] == 0 {
@@ -291,12 +367,15 @@ func (p *dirParser) parseDirChunk(clusterdata []byte, entries *[]Entry) bool {
 		// record was parsed before them.
 		case EXFAT_DIRRECORD_VOLUME_GUID:
 			p.virtualEntry = Entry{etype: p.dirtype, name: VOLUME_GUID}
+			p.addressRecord(&p.virtualEntry)
 			*entries = append(*entries, p.virtualEntry)
 		case EXFAT_DIRRECORD_TEXFAT:
 			p.virtualEntry = Entry{etype: p.dirtype, name: TEXFAT}
+			p.addressRecord(&p.virtualEntry)
 			*entries = append(*entries, p.virtualEntry)
 		case EXFAT_DIRRECORD_ACT:
 			p.virtualEntry = Entry{etype: p.dirtype, name: ACT}
+			p.addressRecord(&p.virtualEntry)
 			*entries = append(*entries, p.virtualEntry)
 		default:
 			if (p.dirtype & 0x7f) == EXFAT_DIRRECORD_DEL_FILEDIR {
@@ -343,6 +422,7 @@ func (p *dirParser) parseDirChunk(clusterdata []byte, entries *[]Entry) bool {
 		p.offset += EXFAT_DIRRECORD_SIZE
 	}
 
+	p.slotBase += uint32(len(clusterdata) / EXFAT_DIRRECORD_SIZE)
 	return false
 }
 
@@ -360,6 +440,7 @@ func (p *dirParser) populateRecordBitmapUpcase(rec dirRecordView) {
 	entryCluster := rec.le32(20)
 	dataLen := rec.le64(24)
 
+	p.addressRecord(&p.virtualEntry)
 	p.virtualEntry.etype = p.dirtype
 	p.virtualEntry.dataLen = dataLen
 	p.virtualEntry.entryCluster = entryCluster
@@ -393,6 +474,7 @@ func (p *dirParser) populateRecordBitmapUpcase(rec dirRecordView) {
 }
 
 func (p *dirParser) populateDirRecordDel(rec dirRecordView) {
+	p.addressRecord(&p.entry)
 	p.entry.etype = p.dirtype
 	p.entry.secondaryCount = uint32(rec.byteAt(1))
 	p.entry.entryAttr = rec.le16(4)
@@ -415,7 +497,6 @@ func (p *dirParser) populateDirRecordDel(rec dirRecordView) {
 func (p *dirParser) populateDirRecordStreamSeen(rec dirRecordView) {
 	p.entry.nameLen = rec.byteAt(3)
 	p.entry.nameHash = rec.le16(4)
-	p.entry.readNameLen = 0
 	p.entry.entryCluster = rec.le32(20)
 	p.entry.dataLen = rec.le64(24)
 	// ValidDataLength lives at offset 8 of the stream extension entry, not 24.

@@ -69,9 +69,9 @@ func TestGetClusterListRejectsRegionEntries(t *testing.T) {
 		t.Fatalf("getClusterList() = (%v, %d), want (nil, 0)", clusters, tail)
 	}
 
-	offset, isRegion := entry.GetRegionOffset()
+	offset, isRegion := entry.RegionOffset()
 	if !isRegion || offset != 6144 {
-		t.Fatalf("GetRegionOffset() = (%d, %v), want (6144, true)", offset, isRegion)
+		t.Fatalf("RegionOffset() = (%d, %v), want (6144, true)", offset, isRegion)
 	}
 }
 

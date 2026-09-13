@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 // A 4Kn volume: 4096-byte sectors, one sector per cluster.
@@ -91,12 +91,12 @@ func TestFourKSectorDataRegionOffset(t *testing.T) {
 		t.Fatalf("NewFromReaderAt() on a 4Kn volume error = %v", err)
 	}
 
-	if got := fs.GetClusterSize(); got != fourKSectorSize {
-		t.Fatalf("GetClusterSize() = %d, want %d", got, fourKSectorSize)
+	if got := fs.ClusterSize(); got != fourKSectorSize {
+		t.Fatalf("ClusterSize() = %d, want %d", got, fourKSectorSize)
 	}
 
-	if got := fs.GetClusterOffset(fourKBitmapClust); got != uint64(wantBitmapOffset) {
-		t.Fatalf("GetClusterOffset(%d) = %d, want %d",
+	if got := mustClusterOffset(t, fs, fourKBitmapClust); got != uint64(wantBitmapOffset) {
+		t.Fatalf("ClusterOffset(%d) = %d, want %d",
 			fourKBitmapClust, got, wantBitmapOffset)
 	}
 
@@ -136,8 +136,8 @@ func TestFourKSectorBootRegionSize(t *testing.T) {
 	}
 
 	mbr := findEntry(t, entries, "$MBR")
-	if want := uint64(12 * fourKSectorSize); mbr.GetSize() != want {
-		t.Fatalf("$MBR size = %d, want %d", mbr.GetSize(), want)
+	if want := uint64(12 * fourKSectorSize); mbr.Size() != want {
+		t.Fatalf("$MBR size = %d, want %d", mbr.Size(), want)
 	}
 }
 
@@ -164,7 +164,20 @@ func TestFourKSectorPartitionLBA(t *testing.T) {
 	// Offsets are relative to the reader, so the data region now starts at the
 	// volume-relative position.
 	wantCluster := uint64(fourKDataOffset+(fourKBitmapClust-fourKRootCluster)) * fourKSectorSize
-	if got := fs.GetClusterOffset(fourKBitmapClust); got != wantCluster {
-		t.Fatalf("GetClusterOffset(%d) = %d, want %d", fourKBitmapClust, got, wantCluster)
+	if got := mustClusterOffset(t, fs, fourKBitmapClust); got != wantCluster {
+		t.Fatalf("ClusterOffset(%d) = %d, want %d", fourKBitmapClust, got, wantCluster)
 	}
+}
+
+// mustClusterOffset is ClusterOffset with the error turned into a test failure, for
+// the assertions below where an invalid cluster would mean the fixture is wrong
+// rather than the library.
+func mustClusterOffset(t *testing.T, fs *libxfat.ExFAT, cluster uint32) uint64 {
+	t.Helper()
+
+	offset, err := fs.ClusterOffset(cluster)
+	if err != nil {
+		t.Fatalf("ClusterOffset(%d): %v", cluster, err)
+	}
+	return offset
 }

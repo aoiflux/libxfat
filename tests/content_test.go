@@ -2,14 +2,16 @@ package test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 // TestReadEntryMatchesExtraction is the point of the content API: the bytes read
@@ -40,8 +42,8 @@ func TestReadEntryMatchesExtraction(t *testing.T) {
 				t.Fatalf("ReadEntry gave %d bytes, extraction gave %d, and they differ",
 					len(inMemory), len(onDisk))
 			}
-			if int64(len(inMemory)) != int64(entry.GetSize()) {
-				t.Errorf("read %d bytes, entry records %d", len(inMemory), entry.GetSize())
+			if int64(len(inMemory)) != int64(entry.Size()) {
+				t.Errorf("read %d bytes, entry records %d", len(inMemory), entry.Size())
 			}
 		})
 	}
@@ -225,7 +227,7 @@ func TestDeletedNoFatChainIsNotAGuess(t *testing.T) {
 	fs := openSuperfloppy(t, true)
 	entry := entryNamed(t, fs, "erased.txt (deleted)")
 
-	if !entry.DoesNotHaveFatChain() {
+	if !entry.IsContiguous() {
 		t.Skip("fixture deleted entry does not record NoFatChain")
 	}
 
@@ -246,10 +248,97 @@ func TestDeletedNoFatChainIsNotAGuess(t *testing.T) {
 	if len(result.Ranges) == 0 {
 		t.Fatal("no ranges located for a deleted entry that recorded its own layout")
 	}
-	if result.BytesCovered != int64(entry.GetSize()) {
-		t.Errorf("located %d bytes, entry records %d", result.BytesCovered, entry.GetSize())
+	if result.BytesCovered != int64(entry.Size()) {
+		t.Errorf("located %d bytes, entry records %d", result.BytesCovered, entry.Size())
 	}
 	if result.Truncated {
 		t.Error("Truncated is set despite the whole declared run being located")
 	}
+}
+
+// TestExtractAllFilesReproducesTheTree is the acceptance test for X3's rewrite of
+// ExtractAllFiles over the walk. It also pins what is deliberately absent: the
+// deleted entries, and any output on stdout.
+func TestExtractAllFilesReproducesTheTree(t *testing.T) {
+	fs := openSuperfloppy(t, true)
+	dst := t.TempDir()
+
+	if err := fs.ExtractAllFiles(context.Background(), dst); err != nil {
+		t.Fatalf("ExtractAllFiles: %v", err)
+	}
+
+	// Every live file in the fixture, with the content the builder filled its
+	// clusters with. deep.bin spans two clusters carrying different bytes, so its
+	// expectation is written out per cluster: that is what distinguishes a reader
+	// that fetched the second cluster from one that read the first one twice.
+	for _, tc := range []struct {
+		path string
+		want []byte
+	}{
+		{filepath.Join("readme.txt"), bytes.Repeat([]byte("R"), 100)},
+		{filepath.Join("docs", "notes.txt"), bytes.Repeat([]byte("N"), 50)},
+		{
+			filepath.Join("docs", "nested", "deep.bin"),
+			append(bytes.Repeat([]byte("D"), 4096), bytes.Repeat([]byte("d"), 5000-4096)...),
+		},
+		{filepath.Join("docs", sfUnnamedDirName, "buried.txt"), bytes.Repeat([]byte("B"), 33)},
+	} {
+		content, err := os.ReadFile(filepath.Join(dst, tc.path))
+		if err != nil {
+			t.Errorf("%s: %v", tc.path, err)
+			continue
+		}
+		if !bytes.Equal(content, tc.want) {
+			t.Errorf("%s: extracted %d bytes, want %d; first difference at %d",
+				tc.path, len(content), len(tc.want), firstDifference(content, tc.want))
+		}
+	}
+
+	// A deleted entry's clusters may already belong to another file, so writing
+	// them out under the deleted file's name would attribute one file's content to
+	// another.
+	if entries, err := os.ReadDir(filepath.Join(dst, "docs")); err == nil {
+		for _, entry := range entries {
+			if strings.Contains(entry.Name(), "erased") || strings.Contains(entry.Name(), "gone") {
+				t.Errorf("a deleted entry was extracted: %q", entry.Name())
+			}
+		}
+	}
+}
+
+// TestExtractAllFilesHonoursCancellation checks the walk's context reaches the
+// extraction, and that an already-cancelled context writes nothing at all.
+func TestExtractAllFilesHonoursCancellation(t *testing.T) {
+	fs := openSuperfloppy(t, true)
+	dst := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := fs.ExtractAllFiles(ctx, dst); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExtractAllFiles with a cancelled context = %v, want context.Canceled", err)
+	}
+
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dst, err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("extraction wrote %d entries despite a cancelled context", len(entries))
+	}
+}
+
+// firstDifference is where two byte slices stop agreeing, for an assertion failure
+// that says where rather than dumping kilobytes of fill bytes.
+func firstDifference(got, want []byte) int {
+	limit := len(got)
+	if len(want) < limit {
+		limit = len(want)
+	}
+	for i := 0; i < limit; i++ {
+		if got[i] != want[i] {
+			return i
+		}
+	}
+	return limit
 }

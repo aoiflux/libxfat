@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 // TestGuidTexfatActCarryNoStream pins a stale-state bug: $Volume GUID, $TexFAT
@@ -20,22 +20,22 @@ func TestGuidTexfatActCarryNoStream(t *testing.T) {
 	for _, name := range []string{"$Volume GUID", "$TexFAT", "$ACT"} {
 		entry := findEntry(t, entries, name)
 
-		if got := entry.GetSize(); got != 0 {
-			t.Errorf("%s: GetSize() = %d, want 0 (no content stream)", name, got)
+		if got := entry.Size(); got != 0 {
+			t.Errorf("%s: Size() = %d, want 0 (no content stream)", name, got)
 		}
-		if got := entry.GetEntryCluster(); got != 0 {
-			t.Errorf("%s: GetEntryCluster() = %d, want 0 (no allocation)", name, got)
+		if got := entry.FirstCluster(); got != 0 {
+			t.Errorf("%s: FirstCluster() = %d, want 0 (no allocation)", name, got)
 		}
-		if got := entry.GetValidDataSize(); got != 0 {
-			t.Errorf("%s: GetValidDataSize() = %d, want 0", name, got)
+		if got := entry.ValidDataSize(); got != 0 {
+			t.Errorf("%s: ValidDataSize() = %d, want 0", name, got)
 		}
 	}
 
 	// The neighbouring records must still be reported correctly.
 	upcase := findEntry(t, entries, "$UpCase")
-	if upcase.GetSize() == 0 || upcase.GetEntryCluster() == 0 {
+	if upcase.Size() == 0 || upcase.FirstCluster() == 0 {
 		t.Fatalf("$UpCase lost its own stream: size = %d, cluster = %d",
-			upcase.GetSize(), upcase.GetEntryCluster())
+			upcase.Size(), upcase.FirstCluster())
 	}
 }
 
@@ -48,27 +48,27 @@ func TestGetClusterListOnRegionEntry(t *testing.T) {
 	for _, name := range []string{"$MBR", "$FAT1"} {
 		entry := findEntry(t, entries, name)
 
-		clusters, tail, err := fs.GetClusterList(entry)
+		clusters, tail, err := fs.ClusterList(entry)
 		if !errors.Is(err, libxfat.ErrNoClusterMapping) {
-			t.Errorf("%s: GetClusterList() error = %v, want ErrNoClusterMapping", name, err)
+			t.Errorf("%s: ClusterList() error = %v, want ErrNoClusterMapping", name, err)
 		}
 		if clusters != nil || tail != 0 {
-			t.Errorf("%s: GetClusterList() = (%v, %d), want (nil, 0)", name, clusters, tail)
+			t.Errorf("%s: ClusterList() = (%v, %d), want (nil, 0)", name, clusters, tail)
 		}
 
-		offset, isRegion := entry.GetRegionOffset()
+		offset, isRegion := entry.RegionOffset()
 		if !isRegion {
-			t.Errorf("%s: GetRegionOffset() reported not a region", name)
+			t.Errorf("%s: RegionOffset() reported not a region", name)
 		}
-		if entry.GetSize() == 0 {
+		if entry.Size() == 0 {
 			t.Errorf("%s: region has zero size", name)
 		}
 
 		// The offset and size must describe a range that is actually readable.
 		data := testImageBytes()
-		if offset+entry.GetSize() > uint64(len(data)) {
+		if offset+entry.Size() > uint64(len(data)) {
 			t.Errorf("%s: region [%d, %d) falls outside a %d byte image",
-				name, offset, offset+entry.GetSize(), len(data))
+				name, offset, offset+entry.Size(), len(data))
 		}
 	}
 }

@@ -125,8 +125,8 @@ For each file:
 ### Allocation Bitmap
 ExFAT tracks free/allocated clusters via a bitmap file (`$BitMap`):
 ```go
-allocated, _ := exfat.GetAllocatedClusters()
-free, _ := exfat.GetFreeClusters()
+allocated, _ := exfat.AllocatedClusters()
+free, _ := exfat.FreeClusters()
 ```
 
 Each bit represents one cluster: 1 = allocated, 0 = free.
@@ -144,7 +144,7 @@ Protected from normal operations:
 
 ### Fragmentation Detection
 ```go
-clusters, fileSize, _ := exfat.GetClusterList(entry)
+clusters, fileSize, _ := exfat.ClusterList(entry)
 // Returns all clusters used by file
 ```
 
@@ -276,7 +276,7 @@ if err != nil {
 
 ### Bitmap Counting
 ```go
-exfat.GetAllocatedClusters()
+exfat.AllocatedClusters()
 // Counts bits in bitmap file
 // O(bitmap size in bytes) complexity
 ```
@@ -284,7 +284,7 @@ exfat.GetAllocatedClusters()
 ### Directory Traversal
 Recursive reading of subdirectories can be expensive for large directory trees. The library provides:
 ```go
-exfat.GetAllEntries(rootEntries)  // Recursive
+exfat.AllEntries(rootEntries)  // Recursive
 exfat.ReadDirs(entries)            // One level
 ```
 
@@ -315,17 +315,17 @@ entries, _ := exfat.ReadRootDir()
 for _, entry := range entries {
     if entry.IsFile() && !entry.IsDeleted() {
         fmt.Printf("File: %s (%d bytes)\n",
-                   entry.GetName(),
-                   entry.GetSize())
+                   entry.Name(),
+                   entry.Size())
 
         // Extract if needed
-        exfat.ExtractEntryContent(entry, "/tmp/" + entry.GetName())
+        exfat.ExtractEntryContent(entry, "/tmp/" + entry.Name())
     }
 }
 
 // Analyze filesystem
-allocated, _ := exfat.GetAllocatedClusters()
-free, _ := exfat.GetFreeClusters()
+allocated, _ := exfat.AllocatedClusters()
+free, _ := exfat.FreeClusters()
 fmt.Printf("%d clusters allocated, %d free\n", allocated, free)
 ```
 

@@ -41,7 +41,7 @@ func BenchmarkParseDirChunk(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				var entries []Entry
 				parser.resetDirParser()
-				parser.parseDirChunk(data, &entries)
+				parser.parseDirChunk(unlocatedChunk, data, &entries)
 			}
 		})
 	}
@@ -63,7 +63,7 @@ func BenchmarkParseDirChunkReusedResult(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		entries = entries[:0]
 		parser.resetDirParser()
-		parser.parseDirChunk(data, &entries)
+		parser.parseDirChunk(unlocatedChunk, data, &entries)
 	}
 }
 
@@ -89,7 +89,7 @@ func BenchmarkParseDeletedDirEntries(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		parser.parseDeletedDirEntries(data)
+		parser.parseDeletedDirEntries(unlocatedChunk, data)
 	}
 }
 

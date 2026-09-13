@@ -287,7 +287,7 @@ func (v *VBR) countClusters(entry Entry) (int, error) {
 	// heap, so they have no clusters to count. Dividing their size by the
 	// cluster size produces a number that looks like an answer and refers to
 	// nothing - and contradicts getClusterList, which refuses them outright.
-	// Locate them with Entry.GetRegionOffset and GetSize instead.
+	// Locate them with Entry.RegionOffset and Size instead.
 	if entry.isRegion {
 		return 0, ErrNoClusterMapping
 	}

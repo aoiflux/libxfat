@@ -19,18 +19,54 @@
 //
 // # Walking the volume
 //
-// ReadRootDir returns the root directory's entries plus the synthetic entries
-// describing the filesystem's own structures ($MBR, $FAT1, $FAT2,
-// $OrphanFiles). From there:
+// Walk is the traversal to reach for. It reports every entry in the tree once,
+// pre-order and in disk order, with the composed path and the parent directory's
+// first cluster, and it takes a context so a pass over a large volume can be
+// stopped. WalkWithOptions adds deleted records, the surviving children of a
+// deleted directory, and the free-space sweep.
 //
-//   - ReadDir and ReadDirs descend one level.
-//   - GetAllEntries and GetIndexableEntries flatten the whole tree.
-//   - GetFullPathIndexableEntries does the same with paths composed.
-//   - RecoverDeletedEntries carves deleted entry sets out of unallocated
-//     clusters.
+//	err := fs.Walk(ctx, func(path string, parent uint32, entry libxfat.Entry) error {
+//		id, _ := fs.FileID(entry)
+//		ranges, err := fs.FragmentOffsets(entry)
+//		...
+//	})
 //
-// Content comes out through ExtractEntryContent, or through GetClusterList and
-// Entry.GetRegionOffset for callers that would rather do their own reading.
+// The older traversals remain. ReadRootDir returns the root's entries plus the
+// synthetic entries describing the filesystem's own structures ($MBR, $FAT1,
+// $FAT2, $OrphanFiles); ReadDir and ReadDirs descend one level; AllEntries
+// flattens the tree; ContiguousFiles and ContiguousFilePaths flatten it through a
+// filter that, as their names now say, keeps only contiguous files - so they omit
+// every fragmented file on the volume. Walk applies no such filter.
+//
+// RecoverDeletedEntries, and its cancellable form, carve entry sets out of
+// unallocated clusters.
+//
+// # Locating and reading file content
+//
+// FragmentOffsets maps an entry to the absolute byte ranges it occupies, reading
+// only FAT entries and never the file itself, so a whole volume can be mapped for
+// the cost of its FAT. FragmentOffsetsWithOptions returns the same runs inside a
+// FragmentResult that says where they came from: whether the chain was walked,
+// whether the volume declared the stream contiguous, and whether the walk was
+// truncated, broken, looping, or working from an assumption.
+//
+// OpenEntry returns a *File that reads through those ranges - Read, ReadAt,
+// ReadAll, WriteTo, and io.Reader, io.ReaderAt and io.SectionReader views - and
+// ReadEntry is the one-call form. Reads are clamped to the bytes actually located
+// rather than to the size the directory entry claims. ExtractEntryContent and
+// ExtractAllFiles write to disk over the same machinery.
+//
+// SlackRange and UnwrittenRanges locate the two kinds of byte an allocation can
+// hold that the file never wrote to.
+//
+// # Identifying entries
+//
+// FileID pairs the parent directory's first cluster with the entry's logical slot
+// index in it, which is the closest thing exFAT offers to a stable identity, and
+// Entry.EntrySetOffset gives the physical address of the entry's own records.
+// Read FileID's documentation before matching on it: a slot reused after a
+// deletion carries its predecessor's identity exactly, and nothing on the volume
+// distinguishes the two.
 //
 // # Strict mode
 //

@@ -20,6 +20,7 @@ const (
 	EXFAT_ROOT_CLUSTER_OFFSET          = 0x60
 	EXFAT_SN_OFFSET                    = 0x64
 	EXFAT_VERSION_OFFSET               = 0x68
+	EXFAT_VOLUME_FLAGS_OFFSET          = 0x6a
 	EXFAT_SECTOR_SIZE_OFFSET           = 0x6c
 	EXFAT_CLUSTER_SIZE_OFFSET          = 0x6d
 	EXFAT_NUMBER_OF_FATS_OFFSET        = 0x6e
@@ -28,6 +29,25 @@ const (
 
 	// There is no cluster 0 or cluster 1 in ExFAT. It starts with cluster 2
 	FIRST_CLUSTER_NUMBER uint64 = 2
+)
+
+// Bits of the VolumeFlags field at EXFAT_VOLUME_FLAGS_OFFSET. Section 3.1.13 of
+// the exFAT specification.
+const (
+	// VOLUME_FLAG_ACTIVE_FAT selects the second FAT on a TexFAT volume. It is
+	// meaningless, and must be zero, when NumberOfFats is 1.
+	VOLUME_FLAG_ACTIVE_FAT = 0x0001
+	// VOLUME_FLAG_VOLUME_DIRTY is set while the volume is mounted for writing and
+	// cleared on a clean unmount, so finding it set says the volume was not
+	// cleanly unmounted and its metadata may be mid-update.
+	VOLUME_FLAG_VOLUME_DIRTY = 0x0002
+	// VOLUME_FLAG_MEDIA_FAILURE records that the implementation met read or write
+	// failures it could not recover from.
+	VOLUME_FLAG_MEDIA_FAILURE = 0x0004
+	// VOLUME_FLAG_CLEAR_TO_ZERO carries no meaning an implementation may rely on;
+	// it is exposed only because reporting the raw field without it invites a
+	// reader to assume the bit is reserved and zero.
+	VOLUME_FLAG_CLEAR_TO_ZERO = 0x0008
 )
 
 // exfat entries constants
@@ -151,7 +171,7 @@ var ErrNoNameHash = errors.New("entry records no name hash")
 // it the hash cannot be checked at all.
 var ErrUpcaseTableNotFound = errors.New("up-case table not found")
 
-// ErrNoClusterMapping is returned by GetClusterList for entries that are backed
+// ErrNoClusterMapping is returned by ClusterList for entries that are backed
 // by a fixed byte range rather than by clusters, namely $MBR, $FAT1 and $FAT2.
 //
 // It is a statement about the cluster API specifically. FragmentOffsets accepts
@@ -175,3 +195,12 @@ var ErrFragmented = errors.New("entry is fragmented")
 // cluster of 0 or 1, neither of which exists in exFAT. There is nothing to
 // locate, and deriving a cluster from the size would invent one.
 var ErrNoDataClusters = errors.New("entry records a size but no first cluster")
+
+// ErrNilContext reports a nil context passed to a cancellable entry point. A nil
+// context is an error rather than a silent context.Background(): a caller who
+// forgot to thread one through has an interruptible operation that cannot be
+// interrupted, and silence hides that.
+var ErrNilContext = errors.New("context is nil")
+
+// ErrNilCallback reports a nil function passed to a walk.
+var ErrNilCallback = errors.New("callback is nil")

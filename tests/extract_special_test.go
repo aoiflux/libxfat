@@ -7,13 +7,13 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 func findEntry(t *testing.T, entries []libxfat.Entry, name string) libxfat.Entry {
 	t.Helper()
 	for _, e := range entries {
-		if e.GetName() == name {
+		if e.Name() == name {
 			return e
 		}
 	}
@@ -70,8 +70,8 @@ func TestExtractBootRegion(t *testing.T) {
 	if !mbr.IsRegion() {
 		t.Fatal("$MBR should report IsRegion")
 	}
-	if want := uint64(12 * testSectorSize); mbr.GetSize() != want {
-		t.Fatalf("$MBR size = %d, want %d", mbr.GetSize(), want)
+	if want := uint64(12 * testSectorSize); mbr.Size() != want {
+		t.Fatalf("$MBR size = %d, want %d", mbr.Size(), want)
 	}
 
 	dst := filepath.Join(t.TempDir(), "mbr.bin")
@@ -83,8 +83,8 @@ func TestExtractBootRegion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	if uint64(len(got)) != mbr.GetSize() {
-		t.Fatalf("extracted $MBR length = %d, want %d", len(got), mbr.GetSize())
+	if uint64(len(got)) != mbr.Size() {
+		t.Fatalf("extracted $MBR length = %d, want %d", len(got), mbr.Size())
 	}
 	if string(got[3:11]) != "EXFAT   " {
 		t.Fatalf("extracted $MBR signature = %q, want %q", got[3:11], "EXFAT   ")
@@ -117,8 +117,8 @@ func TestExtractZeroLengthEntry(t *testing.T) {
 	fs, entries := openTestVolume(t)
 
 	orphans := findEntry(t, entries, "$OrphanFiles")
-	if orphans.GetSize() != 0 {
-		t.Fatalf("$OrphanFiles size = %d, want 0", orphans.GetSize())
+	if orphans.Size() != 0 {
+		t.Fatalf("$OrphanFiles size = %d, want 0", orphans.Size())
 	}
 
 	dst := filepath.Join(t.TempDir(), "orphans.bin")

@@ -66,14 +66,14 @@ func TestPublishOnlyFromRootParse(t *testing.T) {
 		sawBitmap:   true,
 	}
 
-	if fs.GetVolumeLabel() != "" {
+	if fs.publishedVolumeLabel() != "" {
 		t.Fatal("volume label set before any parse published one")
 	}
 
 	fs.publish(out)
 
-	if fs.GetVolumeLabel() != "EVIDENCE" {
-		t.Fatalf("GetVolumeLabel() = %q after publish, want %q", fs.GetVolumeLabel(), "EVIDENCE")
+	if fs.publishedVolumeLabel() != "EVIDENCE" {
+		t.Fatalf("volume label = %q after publish, want %q", fs.publishedVolumeLabel(), "EVIDENCE")
 	}
 	if fs.vbr.bitmapEntry.entryCluster != 9 {
 		t.Fatalf("published $BitMap cluster = %d, want 9", fs.vbr.bitmapEntry.entryCluster)

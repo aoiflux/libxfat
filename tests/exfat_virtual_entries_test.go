@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/aoiflux/libxfat"
+	"github.com/aoiflux/libxfat/v2"
 )
 
 func TestVirtualEntriesPresence(t *testing.T) {
@@ -21,7 +21,7 @@ func TestVirtualEntriesPresence(t *testing.T) {
 	found := map[string]bool{}
 	for _, entry := range virtuals {
 		if entry.IsVirtualEntry() {
-			found[entry.GetName()] = true
+			found[entry.Name()] = true
 		}
 	}
 
@@ -49,13 +49,13 @@ func TestVirtualEntryAttributes(t *testing.T) {
 		if !entry.IsVirtualEntry() {
 			continue
 		}
-		if entry.GetName() == "$MBR" && entry.GetSize() != 12*512 {
-			t.Errorf("$MBR size incorrect: got %d, want %d", entry.GetSize(), 12*512)
+		if entry.Name() == "$MBR" && entry.Size() != 12*512 {
+			t.Errorf("$MBR size incorrect: got %d, want %d", entry.Size(), 12*512)
 		}
-		if entry.GetName() == "$FAT1" && entry.GetSize() != 1*512 {
-			t.Errorf("$FAT1 size incorrect: got %d, want %d", entry.GetSize(), 1*512)
+		if entry.Name() == "$FAT1" && entry.Size() != 1*512 {
+			t.Errorf("$FAT1 size incorrect: got %d, want %d", entry.Size(), 1*512)
 		}
-		if entry.GetName() == "$OrphanFiles" && entry.GetSize() != 0 {
+		if entry.Name() == "$OrphanFiles" && entry.Size() != 0 {
 			t.Errorf("$OrphanFiles size should be 0")
 		}
 	}
@@ -74,9 +74,9 @@ func TestVirtualEntryFlags(t *testing.T) {
 	}
 
 	for _, entry := range virtuals {
-		if entry.GetName() == "$MBR" || entry.GetName() == "$FAT1" || entry.GetName() == "$OrphanFiles" {
+		if entry.Name() == "$MBR" || entry.Name() == "$FAT1" || entry.Name() == "$OrphanFiles" {
 			if !entry.IsVirtualEntry() {
-				t.Errorf("entry %s should be recognized as virtual", entry.GetName())
+				t.Errorf("entry %s should be recognized as virtual", entry.Name())
 			}
 		}
 	}
