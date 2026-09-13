@@ -8,7 +8,7 @@ import (
 	"testing"
 	"unicode/utf16"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 // Volume-level benchmarks: the paths that involve reads, and whose cost scales

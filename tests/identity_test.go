@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 // sfRecordOffset is where the fixture builder put slot number slot of the

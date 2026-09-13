@@ -5,13 +5,13 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 // TestVolumeAccessorsMatchTheBootSector checks every number the volume reports
 // about itself against what the fixture builder wrote. All of these were parsed
-// and then unreachable before v2, so a consumer wanting the sector size had to
-// re-parse the boot sector this library had already read.
+// and then unreachable before v1.3.0, so a consumer wanting the sector size
+// had to re-parse the boot sector this library had already read.
 func TestVolumeAccessorsMatchTheBootSector(t *testing.T) {
 	fs := openSuperfloppy(t, true)
 

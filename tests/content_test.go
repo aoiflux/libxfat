@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 // TestReadEntryMatchesExtraction is the point of the content API: the bytes read

@@ -14,7 +14,7 @@ import (
 	"os/signal"
 	"strings"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 func main() {

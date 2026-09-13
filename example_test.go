@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 // Example_walk lists every entry on a volume with its path and its identity.

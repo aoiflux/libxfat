@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 // walkRecord is one callback invocation, kept whole so a test can assert on the
@@ -458,11 +458,12 @@ func TestWalkCycleGuardTerminates(t *testing.T) {
 // TestWalkNamesAreUndecorated pins that a reported name is the name the volume
 // recorded and nothing else.
 //
-// Releases before v2 appended " (deleted)" to a deleted entry's name, which put
-// the marker into every path composed from it. That made a deleted record's path
-// impossible to compare against the same file seen live, or against another tool's
-// output, and the library itself had to strip the suffix back off internally to
-// answer HasNoName. IsDeleted is the flag; rendering is the caller's business.
+// Releases before v1.3.0 appended " (deleted)" to a deleted entry's name, which
+// put the marker into every path composed from it. That made a deleted record's
+// path impossible to compare against the same file seen live, or against another
+// tool's output, and the library itself had to strip the suffix back off
+// internally to answer HasNoName. IsDeleted is the flag; rendering is the
+// caller's business.
 func TestWalkNamesAreUndecorated(t *testing.T) {
 	fs := openSuperfloppy(t, true)
 

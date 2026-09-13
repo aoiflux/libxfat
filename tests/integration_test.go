@@ -5,7 +5,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 // TestChangeDetectionShape is the end-to-end acceptance test for what this whole
@@ -50,7 +50,7 @@ func TestChangeDetectionShape(t *testing.T) {
 	}
 
 	// Turn each into an absolute byte offset using the volume's own geometry, which
-	// is what a consumer would have to do and could not before v2.
+	// is what a consumer would have to do and could not before v1.3.0.
 	offsets := make([]int64, len(changes))
 	for i, c := range changes {
 		base, err := fs.ClusterOffset(c.at)

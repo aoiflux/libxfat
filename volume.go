@@ -1,9 +1,9 @@
 package libxfat
 
 // This file is the volume's own facts: the numbers the volume boot record
-// records about itself. Every one of them was parsed and then unreachable before
-// v2, which meant a consumer wanting the cluster size or the serial number had to
-// re-parse the boot sector it had just handed to this library.
+// records about itself. Every one of them was parsed and then unreachable
+// before v1.3.0, which meant a consumer wanting the cluster size or the serial
+// number had to re-parse the boot sector it had just handed to this library.
 //
 // They are all reads of fields fixed by parseVBR and never written again, so none
 // of them takes the metadata lock and all of them are safe to call concurrently.

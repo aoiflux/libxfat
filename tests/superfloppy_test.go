@@ -11,7 +11,7 @@ import (
 	"testing"
 	"unicode/utf16"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 // This fixture is a superfloppy: an exFAT volume that begins at byte 0 of the

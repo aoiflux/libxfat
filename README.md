@@ -36,11 +36,11 @@ The library is read-oriented. It does not create or modify exFAT volumes.
 ## Install
 
 ```sh
-go get github.com/aoiflux/libxfat/v2
+go get github.com/aoiflux/libxfat
 ```
 
 ```go
-import "github.com/aoiflux/libxfat/v2"
+import "github.com/aoiflux/libxfat"
 ```
 
 </div>
@@ -144,9 +144,9 @@ The internal parser architecture and zero-copy boundaries are documented in
 
 The module currently targets Go 1.25 as declared in `go.mod`.
 
-Version 2 changed the module path, so the import is
-`github.com/aoiflux/libxfat/v2`. See [CHANGELOG.md](CHANGELOG.md) for what moved
-and why.
+The import path is `github.com/aoiflux/libxfat`, unchanged. v1.3.0 renames and
+removes some exported API; see [CHANGELOG.md](CHANGELOG.md) for what moved and
+why.
 
 ## Quick Start
 
@@ -158,7 +158,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 func main() {

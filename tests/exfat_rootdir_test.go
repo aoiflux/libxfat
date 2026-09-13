@@ -3,7 +3,7 @@ package test
 import (
 	"testing"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 func TestReadRootDirIncludesVirtuals(t *testing.T) {

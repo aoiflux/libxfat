@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 func TestReadRootDirAcceptsEOFClusterRange(t *testing.T) {

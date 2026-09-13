@@ -4,10 +4,12 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - unreleased
+## [1.3.0] - unreleased
 
-Version 2 changes the module path to `github.com/aoiflux/libxfat/v2`. A v1
-consumer is unaffected until it opts in.
+The module path is unchanged: `github.com/aoiflux/libxfat`. This release renames
+and removes exported API, so a consumer pinned to an earlier tag keeps working
+and one upgrading has changes to make. The Changed and Removed sections below are
+the whole list.
 
 The release exists to make libxfat usable for two things it could not do before:
 mapping a file to byte ranges without reading it, and reading file content without

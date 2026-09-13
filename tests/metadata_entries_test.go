@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/aoiflux/libxfat/v2"
+	"github.com/aoiflux/libxfat"
 )
 
 // TestGuidTexfatActCarryNoStream pins a stale-state bug: $Volume GUID, $TexFAT
