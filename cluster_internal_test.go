@@ -21,7 +21,7 @@ func TestGetChainedClusterListAcceptsEOFRange(t *testing.T) {
 		2: EXFAT_EOF_START,
 	})
 
-	chain, err := vbr.getChainedClusterList(2)
+	chain, err := vbr.getChainedClusterList(2, 1)
 	if err != nil {
 		t.Fatalf("getChainedClusterList() error = %v", err)
 	}
@@ -36,7 +36,7 @@ func TestGetChainedClusterListDetectsLoop(t *testing.T) {
 		3: 2,
 	})
 
-	_, err := vbr.getChainedClusterList(2)
+	_, err := vbr.getChainedClusterList(2, 0)
 	if !errors.Is(err, ErrClusterChainLoop) {
 		t.Fatalf("getChainedClusterList() error = %v, want ErrClusterChainLoop", err)
 	}

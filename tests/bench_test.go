@@ -289,3 +289,65 @@ func BenchmarkVerifyNameHash(b *testing.B) {
 		}
 	}
 }
+
+// openSuperfloppyBench opens the audited fixture rather than buildBenchImage,
+// because buildBenchImage's files are all zero-length and contiguous - it has no
+// FAT chain for GetClusterList to walk.
+func openSuperfloppyBench(b *testing.B) *libxfat.ExFAT {
+	b.Helper()
+
+	image := buildSuperfloppyImage()
+	path := filepath.Join(b.TempDir(), "superfloppy.exfat")
+	if err := os.WriteFile(path, image, 0o600); err != nil {
+		b.Fatalf("write fixture: %v", err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		b.Fatalf("open fixture: %v", err)
+	}
+	b.Cleanup(func() { _ = file.Close() })
+
+	fs, err := libxfat.Open(libxfat.Source{
+		Reader: file, Size: int64(len(image)),
+		Strict: true, IgnorePartitionOffset: true,
+	})
+	if err != nil {
+		b.Fatalf("open volume: %v", err)
+	}
+	return fs
+}
+
+// BenchmarkGetClusterListChained measures the FAT-chained branch, which used to
+// build the contiguous cluster range and immediately throw it away.
+//
+// The fixture's fragmented.bin spans two clusters, so the bytes here understate
+// what the change is worth: the discarded slice was sized by the file, so on a
+// real volume it scales with the size of every fragmented file walked. The
+// allocation count is the part that transfers directly.
+func BenchmarkGetClusterListChained(b *testing.B) {
+	fs := openSuperfloppyBench(b)
+	root, err := fs.ReadRootDir()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	var target libxfat.Entry
+	for _, entry := range root {
+		if entry.GetName() == "fragmented.bin" {
+			target = entry
+			break
+		}
+	}
+	if target.GetName() != "fragmented.bin" {
+		b.Fatal("fragmented.bin not found in fixture root")
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		if _, _, err := fs.GetClusterList(target); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

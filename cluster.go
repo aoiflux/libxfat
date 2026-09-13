@@ -328,19 +328,35 @@ func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
 	}
 
 	sizeInClusters, remainder := v.size2Clusters(entry.dataLen)
-	clusterList := getRange(entry.entryCluster, sizeInClusters)
 
-	var err error
-	if !entry.noFatChain {
-		clusterList, err = v.getChainedClusterList(entry.entryCluster)
+	// A FAT-chained entry's cluster list comes from the chain, not from the size,
+	// so building the contiguous range first only to replace it is a whole
+	// []uint32 allocated and dropped for every fragmented file. Pass the size down
+	// as a capacity hint instead, where it is worth something.
+	var (
+		clusterList []uint32
+		err         error
+	)
+	if entry.noFatChain {
+		clusterList = getRange(entry.entryCluster, sizeInClusters)
+	} else {
+		clusterList, err = v.getChainedClusterList(entry.entryCluster, sizeInClusters)
 		if err != nil {
 			return nil, 0, err
 		}
 	}
 
+	// The tail cluster is read to confirm the mapping actually resolves to
+	// readable data before it is handed out; the bytes themselves are not wanted.
+	// readClusters would allocate a cluster for them and drop it on every call, so
+	// read into pooled scratch instead. For a single cluster the two agree on
+	// every error: isValidCluster already implies the range check readClusters
+	// adds, so nothing here can report differently than it did.
+	state := v.acquireVisit()
+	defer v.releaseVisit(state)
+
 	latestCluster := clusterList[len(clusterList)-1]
-	_, err = v.readClusters(latestCluster, 1)
-	if err != nil {
+	if err = v.readClusterInto(latestCluster, state.buf); err != nil {
 		return nil, 0, err
 	}
 
@@ -352,8 +368,28 @@ func (v *VBR) getClusterList(entry Entry) ([]uint32, uint64, error) {
 	return clusterList, filetail, nil
 }
 
-func (v *VBR) getChainedClusterList(cluster uint32) ([]uint32, error) {
+// maxClusterListSeed bounds the capacity getChainedClusterList reserves up
+// front. The seed is derived from a size read off the disk, and on a forensic
+// image a size is exactly the kind of field that is wrong or hostile, so it must
+// never name an allocation on its own. Past this point the doubling growth is
+// amortised well enough that the seed is not worth the exposure.
+const maxClusterListSeed = 4096
+
+// getChainedClusterList walks a FAT chain from cluster and returns every cluster
+// in it.
+//
+// sizeHint is the chain length the entry's size implies, and it only seeds
+// capacity: the walk alone decides the contents, so a hint that is too small
+// costs an append growth and one that is too large costs some slack, and neither
+// can change the answer. Callers with no size to offer pass 0.
+func (v *VBR) getChainedClusterList(cluster uint32, sizeHint uint64) ([]uint32, error) {
 	var clusterList []uint32
+	if sizeHint > 0 {
+		// visitFatChain refuses a chain longer than the volume has clusters, so
+		// that is the most a correct result can hold.
+		clusterList = make([]uint32, 0, min(sizeHint, uint64(v.nbClusters), maxClusterListSeed))
+	}
+
 	err := v.visitFatChain(cluster, func(cluster uint32, _ []byte) error {
 		clusterList = append(clusterList, cluster)
 		return nil
