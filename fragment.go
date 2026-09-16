@@ -5,17 +5,50 @@ import (
 	"sort"
 )
 
-// Range is one contiguous run of bytes in the image passed to Open.
+// Range is one contiguous run of bytes in the image passed to Open. Ranges are
+// the unit that lets a caller work out which bytes of an image a file occupies
+// without re-walking the FAT.
 //
-// StartByte is an absolute offset within that io.ReaderAt, and it already
-// includes Source.Base: every offset this library computes is relative to the
-// start of the reader rather than to the start of the volume, so a Range over a
-// volume opened at a partition offset needs no adjustment before it is compared
-// against whole-disk byte ranges. Ranges are the unit that lets a caller work
-// out which bytes of an image a file occupies without re-walking the FAT.
+// The semantics an adapter needs, stated once:
+//
+//   - StartByte is absolute within the io.ReaderAt the volume was opened over,
+//     and already includes Source.Base. Every offset this library computes is
+//     relative to the start of the reader rather than to the start of the
+//     volume, so a Range over a volume opened at a partition offset needs no
+//     adjustment before it is compared against whole-disk byte ranges.
+//   - Length counts only the entry's own bytes. The final run is trimmed to the
+//     recorded data length, so the ranges sum to that length and never include
+//     the slack at the end of the last cluster; that slack is SlackRange.
+//   - Holes do not occur. exFAT has no sparse allocation, so no run is ever
+//     elided and Sparse is always false - see the field comment, which also
+//     draws the distinction from never-written.
+//   - The ValidDataLength boundary does not split a run. Bytes past it lie
+//     inside these ranges, and UnwrittenRanges reports them separately.
+//   - Adjacent runs are coalesced, so a contiguous file yields exactly one Range
+//     and len(ranges) > 1 is what fragmentation means here.
+//   - The slice is in file order, which is the order the chain visits clusters
+//     and so not necessarily ascending StartByte. It is sorted by FileOffset and
+//     gap-free: each run begins where the one before it ended in the file's own
+//     byte space.
+//
+// A Range whose provenance matters should be obtained from
+// FragmentOffsetsWithOptions, which reports how the runs were derived rather
+// than only what they are.
 type Range struct {
-	// StartByte is the absolute byte offset of the run within the image.
+	// StartByte is the absolute byte offset of the run within the image,
+	// including Source.Base.
 	StartByte int64 `json:"start_byte"`
+	// FileOffset is where the run begins within the entry's own byte space: 0
+	// for the first run, and the sum of every preceding run's Length after that.
+	// It is what maps a changed image range back to a position inside the file,
+	// and it is reported rather than left to the caller because deriving it
+	// means knowing that no run is ever elided.
+	//
+	// For the Range returned by SlackRange it is the entry's data length, slack
+	// being what follows the last byte of content. For those returned by
+	// UnwrittenRanges it is where the unwritten part begins, so the first of
+	// them starts at ValidDataLength.
+	FileOffset int64 `json:"file_offset"`
 	// Length is the number of bytes in the run.
 	Length int64 `json:"length"`
 	// Sparse is always false on exFAT: the format has no sparse allocation and
@@ -144,14 +177,35 @@ func IsFragmented(ranges []Range) bool {
 	return len(ranges) > 1
 }
 
+// assignFileOffsets numbers runs by their position in the entry's byte space, in
+// place. The slice must already be in file order, which every producer in this
+// package guarantees.
+//
+// Sparse runs are counted like any other, because on exFAT there are none: were
+// a hole ever elided instead of reported, the running sum would silently stop
+// describing the file. That is the detail this function exists to stop every
+// caller from having to get right for itself.
+func assignFileOffsets(ranges []Range) {
+	var at int64
+	for i := range ranges {
+		ranges[i].FileOffset = at
+		at += ranges[i].Length
+	}
+}
+
 // Coalesce merges byte-adjacent runs.
 //
 // The ranges this package produces are already coalesced, because runs are closed
 // only where the chain stops being contiguous. It is exported for a caller
 // assembling a range list from several sources - intersecting a file against a
 // set of changed byte ranges, say - where adjacency can reappear.
+//
+// The returned runs are renumbered, so FileOffset describes the merged slice
+// rather than the input. That assumes the input was in file order and gap-free,
+// which is what merging adjacent runs means in the first place.
 func Coalesce(ranges []Range) []Range {
 	if len(ranges) < 2 {
+		assignFileOffsets(ranges)
 		return ranges
 	}
 
@@ -166,7 +220,9 @@ func Coalesce(ranges []Range) []Range {
 		merged = append(merged, current)
 		current = next
 	}
-	return append(merged, current)
+	merged = append(merged, current)
+	assignFileOffsets(merged)
+	return merged
 }
 
 // maxCluster is the highest cluster number the heap contains.
@@ -551,6 +607,10 @@ func (e *ExFAT) FragmentOffsetsWithOptions(entry Entry, opts FragmentOptions) (*
 	if entry.hasStreamExtension() && !entry.AllocationPossible() {
 		result.AllocationContradiction = true
 	}
+	// Numbered here rather than in each builder below it, so that every way of
+	// arriving at a run list - a walked chain, a declared contiguity, an assumed
+	// one, a region entry - is numbered by the same code.
+	assignFileOffsets(result.Ranges)
 	return result, nil
 }
 
@@ -629,8 +689,11 @@ func (e *ExFAT) SlackRange(entry Entry) (Range, bool, error) {
 		return Range{}, false, nil
 	}
 
+	// Slack begins where the content ends, so its FileOffset is the one this
+	// package reports that is not a position inside the file.
 	slack := Range{
 		StartByte:    last.EndByte(),
+		FileOffset:   last.FileOffset + last.Length,
 		Length:       perCluster - used,
 		StartCluster: last.StartCluster + last.ClusterCount - 1,
 		ClusterCount: 1,
@@ -686,6 +749,7 @@ func (e *ExFAT) UnwrittenRanges(entry Entry) ([]Range, error) {
 			}
 			part := r
 			part.StartByte += skip
+			part.FileOffset += skip
 			part.Length -= skip
 			if part.Length > 0 {
 				perCluster := int64(e.vbr.clusterSize)

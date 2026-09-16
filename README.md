@@ -401,7 +401,12 @@ says so rather than padding.
 
 `Range` gives absolute byte offsets and lengths, coalesced into runs, so a
 changed-range list can be intersected against a file's extents without reading
-any file data. `FragmentResult` carries the provenance: `ChainWalked`,
+any file data. Each run also carries `FileOffset`, where it begins in the file's
+own byte space, so a changed image range maps back to a position inside the file
+without the caller accumulating lengths. The slice is in file order, sorted by
+`FileOffset` and gap-free; `Length` counts only the file's own bytes, with
+cluster slack left to `SlackRange` and the never-written tail to
+`UnwrittenRanges`. `Range`'s documentation states all of this in full. `FragmentResult` carries the provenance: `ChainWalked`,
 `NoFatChain`, `Assumed`, `Truncated`, `ChainBroken`, `LoopDetected`,
 `FirstClusterReallocated`, `AllocationContradiction`, `ValidBytes`.
 
@@ -427,9 +432,14 @@ identity exactly, and no field on an exFAT volume distinguishes the two.
 - `(*ExFATReport).Summary()`, `FilterFiles`, `FilesByType`, `DeletedFiles`,
   `RecoveredFiles`, `FragmentedFiles`, `AssumedFiles`
 
-A report is one document: an `ExFATMeta` block describing the volume, and one
-`ExFATFile` row per entry carrying its identity, its extents and how those extents
-were derived. It is the form for a consumer that does not link against this
+A report is one document: a provenance header, an `ExFATMeta` block describing the
+volume, and one `ExFATFile` row per entry carrying its identity, its extents and how
+those extents were derived. The header is `schema_version` (the document shape, the
+constant `ReportSchemaVersion`), `library_version` and `generated` - a report is
+evidence, and a consumer reading one years later has to be able to pin the schema it
+understands and reject one it does not. `generated` is wall-clock time and the only
+field that differs between two reports of an unchanged volume, so exclude it when
+hashing a report to detect change. It is the form for a consumer that does not link against this
 library, and it follows the same two rules the API does — an identity scalar is
 never omitted when zero, and a provenance flag is never omitted when false,
 because a missing key and a recorded `false` mean entirely different things to

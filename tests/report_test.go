@@ -24,6 +24,55 @@ func reportOf(t *testing.T, opts libxfat.ReportOptions) *libxfat.ExFATReport {
 	return report
 }
 
+// TestReportCarriesSchemaVersionAndProvenance is the X10 acceptance case. A
+// report is evidence, so it has to survive being written down and read back by a
+// tool that was not built against the library that produced it: the schema it
+// follows, the release that wrote it and when, all present after a round trip.
+func TestReportCarriesSchemaVersionAndProvenance(t *testing.T) {
+	report := reportOf(t, libxfat.ReportOptions{})
+
+	if report.SchemaVersion != libxfat.ReportSchemaVersion {
+		t.Errorf("SchemaVersion = %d, want %d", report.SchemaVersion, libxfat.ReportSchemaVersion)
+	}
+	if report.LibraryVersion != libxfat.LibraryVersion {
+		t.Errorf("LibraryVersion = %q, want %q", report.LibraryVersion, libxfat.LibraryVersion)
+	}
+	if report.Generated.IsZero() {
+		t.Error("Generated is the zero time")
+	}
+
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// The keys, not just the fields: a consumer that does not link against this
+	// library reads the document, and a renamed key is invisible to the struct
+	// round trip below.
+	for _, key := range []string{"schema_version", "library_version", "generated"} {
+		if !bytes.Contains(raw, []byte(key)) {
+			t.Errorf("the encoded report has no %s key", key)
+		}
+	}
+
+	var back libxfat.ExFATReport
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.SchemaVersion == 0 {
+		t.Fatal("SchemaVersion is zero after a round trip")
+	}
+	if back.SchemaVersion != report.SchemaVersion {
+		t.Errorf("SchemaVersion = %d after a round trip, want %d", back.SchemaVersion, report.SchemaVersion)
+	}
+	if back.LibraryVersion != report.LibraryVersion {
+		t.Errorf("LibraryVersion = %q after a round trip, want %q", back.LibraryVersion, report.LibraryVersion)
+	}
+	if !back.Generated.Equal(report.Generated) {
+		t.Errorf("Generated = %v after a round trip, want %v", back.Generated, report.Generated)
+	}
+}
+
 func rowNamed(t *testing.T, report *libxfat.ExFATReport, path string) libxfat.ExFATFile {
 	t.Helper()
 

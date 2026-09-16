@@ -4,7 +4,60 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.0] - unreleased
+## [1.4.0] - 2026-09-16
+
+The Go API is additive: no exported symbol was removed, renamed or
+re-signatured, and no JSON key was removed or renamed. Reports gain three keys
+and every extent gains one, which a consumer that ignores unknown keys is
+unaffected by. The module path is unchanged and stays at v1.
+
+The one theoretical source of friction is that `Range` gains a field, so an
+unkeyed composite literal - `Range{a, b, c, d, e}` - no longer compiles. A keyed
+literal, which is what any code outside this package should have been using,
+is unaffected.
+
+### Added
+
+- **File-relative offsets on runs.** `Range.FileOffset` (`file_offset`) is where
+  a run begins in the file's own byte space, so mapping a changed image range
+  back to a position inside the file no longer requires the caller to accumulate
+  lengths. Deriving it by hand is only correct if you know no run is ever elided
+  - true on exFAT, not true in general - and getting it wrong yields a plausible
+  wrong answer rather than an error, which is the failure this field removes.
+  `Coalesce` renumbers the runs it returns.
+- The field is placed and named to match the sibling `libfat`, whose `Range` is
+  again identical to this one field for field. The two libraries agreeing is
+  worth more than either being marginally different.
+- `SlackRange` reports the entry's recorded data length as its `FileOffset`,
+  slack being what follows the last byte of content, and `UnwrittenRanges`
+  numbers its parts from `ValidDataLength`. Both are stated in the field's
+  documentation, since neither is a position inside the file.
+- `Range`'s documentation now states its semantics in full, as the list of
+  questions an adapter author would otherwise answer by reading the
+  implementation: offsets are image-absolute and include `Source.Base`, `Length`
+  excludes cluster slack, holes do not occur, the `ValidDataLength` boundary does
+  not split a run, adjacent runs are coalesced, and the slice is in file order,
+  sorted by `FileOffset` and gap-free.
+- **Report schema version and provenance.** `ExFATReport` gains `SchemaVersion`
+  (`schema_version`, currently `1`, exposed as the constant
+  `ReportSchemaVersion`), `LibraryVersion` (`library_version`, the constant
+  `LibraryVersion`) and `Generated` (`generated`). A forensic report is evidence
+  and outlives the tool that produced it; without a schema version a consumer
+  can neither pin what it understands nor detect a document written by a version
+  it does not. `SchemaVersion` increments when a field is removed, renamed or
+  changes meaning, never when one is added.
+- `Generated` is wall-clock time and so the only field that differs between two
+  reports of an unchanged volume. A consumer hashing a report to detect change
+  must exclude it. It is unrelated to `ExFATMeta.Revision`, which is the volume's
+  own on-disk format revision.
+
+### Changed
+
+- The report's `FileFragment.FileOffset` is now read from the `Range` rather than
+  derived while converting, so the document and the API cannot disagree about
+  where a run sits in the file. The emitted values are unchanged.
+
+## [1.3.0] - 2026-09-14
 
 The module path is unchanged: `github.com/aoiflux/libxfat`. This release renames
 and removes exported API, so a consumer pinned to an earlier tag keeps working

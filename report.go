@@ -20,7 +20,25 @@ import (
 	"io"
 	"math"
 	"strings"
+	"time"
 )
+
+// ReportSchemaVersion is the schema every ExFATReport this package produces
+// declares in its SchemaVersion field.
+//
+// It is incremented when a field is removed, renamed, or changes meaning -
+// anything that could make a consumer written against an older version read a
+// document wrongly. Adding a field does not increment it, because a consumer
+// that ignores the new field still reads the document correctly.
+const ReportSchemaVersion = 1
+
+// LibraryVersion is the release of libxfat that produced a report, recorded on
+// every ExFATReport so a document can be traced back to the code that wrote it.
+//
+// Nothing enforces this against the repository's tags: it must be updated in the
+// same commit that moves the tag, or it will claim a version that was never
+// released.
+const LibraryVersion = "v1.4.0"
 
 // ExFATReport is a volume-level view of an exFAT image, in the shape the sibling
 // filesystem libraries emit so that reports from several filesystems can be
@@ -31,7 +49,30 @@ import (
 // every offset in this document is absolute within that reader, so the bounds are
 // stated the same way. The sibling libfat report measures from the volume instead,
 // which is the one difference to watch when reading both.
+//
+// # Reading an old report
+//
+// SchemaVersion, LibraryVersion and Generated exist because a report is evidence,
+// and evidence outlives the tool that produced it. A consumer should check
+// SchemaVersion against ReportSchemaVersion and refuse a document it does not
+// understand, rather than silently reading fields that may have changed meaning.
 type ExFATReport struct {
+	// SchemaVersion is ReportSchemaVersion, the schema this document follows. It
+	// is not omitted when zero: a version that vanishes when absent cannot be
+	// told from one this library never wrote, which is the whole point of it.
+	SchemaVersion int `json:"schema_version"`
+	// LibraryVersion is the release of libxfat that produced this document, and
+	// Generated is when it did. Both are facts about the report rather than about
+	// the volume - in particular Generated is not a timestamp read from the
+	// filesystem, and is unrelated to ExFATMeta.Revision, which is the volume's
+	// own on-disk format revision.
+	//
+	// Generated is wall-clock time, so it is the one field here that differs
+	// between two reports of an unchanged volume. A consumer hashing a report to
+	// detect change must exclude it.
+	LibraryVersion string    `json:"library_version"`
+	Generated      time.Time `json:"generated"`
+
 	Name        string      `json:"name"`
 	StartOffset int64       `json:"start_offset"`
 	EndOffset   int64       `json:"end_offset"`
@@ -384,11 +425,16 @@ func (e *ExFAT) ReportWithOptionsContext(ctx context.Context, name string, opts 
 		return nil, ErrNilContext
 	}
 
+	// Stamped at construction rather than on the way out, so that the partial
+	// report returned when the walk fails still says what schema it is in.
 	report := &ExFATReport{
-		Name:        name,
-		StartOffset: e.Base(),
-		EndOffset:   e.Base() + volumeBytes(e),
-		Files:       []ExFATFile{},
+		SchemaVersion:  ReportSchemaVersion,
+		LibraryVersion: LibraryVersion,
+		Generated:      time.Now().UTC(),
+		Name:           name,
+		StartOffset:    e.Base(),
+		EndOffset:      e.Base() + volumeBytes(e),
+		Files:          []ExFATFile{},
 	}
 
 	// The walk reads the root first, which is what publishes the volume label and
@@ -551,7 +597,7 @@ func (e *ExFAT) resolveRow(row *ExFATFile, entry Entry, opts ReportOptions) {
 		BytesCovered:            result.BytesCovered,
 		ValidBytes:              result.ValidBytes,
 	}
-	row.Fragments = toFileFragments(result.Ranges, 0)
+	row.Fragments = toFileFragments(result.Ranges)
 	row.IsFragmented = IsFragmented(result.Ranges)
 
 	// A deleted entry's first cluster was already tested against the bitmap to
@@ -572,13 +618,13 @@ func (e *ExFAT) resolveRow(row *ExFATFile, entry Entry, opts ReportOptions) {
 
 	if opts.IncludeSlack {
 		if slack, ok, serr := e.SlackRange(entry); serr == nil && ok {
-			frag := toFileFragments([]Range{slack}, row.Size)[0]
+			frag := toFileFragments([]Range{slack})[0]
 			row.Slack = &frag
 		}
 	}
 	if opts.IncludeUnwritten {
 		if unwritten, uerr := e.UnwrittenRanges(entry); uerr == nil && len(unwritten) > 0 {
-			row.Unwritten = toFileFragments(unwritten, row.Layout.ValidBytes)
+			row.Unwritten = toFileFragments(unwritten)
 		}
 	}
 }
@@ -603,24 +649,26 @@ func entryType(entry Entry) string {
 	}
 }
 
-// toFileFragments converts the package's Range list into the report's extent type,
-// filling in the file-relative offset that Range does not carry. firstOffset is
-// where the first run begins within the file, which is zero for a file's own
-// extents and the boundary the run follows for slack and unwritten tails.
-func toFileFragments(ranges []Range, firstOffset int64) []FileFragment {
+// toFileFragments converts the package's Range list into the report's extent type.
+// The two carry the same facts; the report states the run's end as well as its
+// length because a document is read without the help of EndByte.
+//
+// The file-relative offset is read from the Range rather than derived here, so
+// that the document and the API cannot disagree about where a run sits in the
+// file. That includes the slack and unwritten runs, which carry the boundary they
+// follow.
+func toFileFragments(ranges []Range) []FileFragment {
 	out := make([]FileFragment, 0, len(ranges))
-	fileOffset := firstOffset
 	for _, r := range ranges {
 		out = append(out, FileFragment{
 			StartOffset:  r.StartByte,
 			EndOffset:    r.EndByte(),
-			FileOffset:   fileOffset,
+			FileOffset:   r.FileOffset,
 			Length:       r.Length,
 			Sparse:       r.Sparse,
 			StartCluster: r.StartCluster,
 			ClusterCount: r.ClusterCount,
 		})
-		fileOffset += r.Length
 	}
 	return out
 }
