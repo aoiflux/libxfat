@@ -118,6 +118,7 @@ The internal parser architecture and zero-copy boundaries are documented in
 └── libxfat/
     ├── README.md
     ├── CHANGELOG.md
+    ├── RELEASE_NOTES.md # what is new in the current release
     ├── xfat.go          # package docs, Source, constructors
     ├── chain.go         # the topology-only FAT walk
     ├── cluster.go       # cluster traversal and content reads
@@ -144,9 +145,11 @@ The internal parser architecture and zero-copy boundaries are documented in
 
 The module currently targets Go 1.25 as declared in `go.mod`.
 
-The import path is `github.com/aoiflux/libxfat`, unchanged. v1.3.0 renames and
-removes some exported API; see [CHANGELOG.md](CHANGELOG.md) for what moved and
-why.
+The import path is `github.com/aoiflux/libxfat`, unchanged. The current release
+is v1.4.0, which is additive: it adds a file-relative offset to every extent and
+a schema-version header to the report, and removes nothing - see
+[RELEASE_NOTES.md](RELEASE_NOTES.md). v1.3.0 before it renamed and removed some
+exported API; see [CHANGELOG.md](CHANGELOG.md) for what moved and why.
 
 ## Quick Start
 
