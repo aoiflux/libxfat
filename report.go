@@ -38,7 +38,7 @@ const ReportSchemaVersion = 1
 // Nothing enforces this against the repository's tags: it must be updated in the
 // same commit that moves the tag, or it will claim a version that was never
 // released.
-const LibraryVersion = "v1.4.0"
+const LibraryVersion = "v1.5.0"
 
 // ExFATReport is a volume-level view of an exFAT image, in the shape the sibling
 // filesystem libraries emit so that reports from several filesystems can be

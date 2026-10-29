@@ -4,6 +4,57 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-10-29
+
+The Go API is additive: one option, one type and five constants are new, and
+nothing was removed, renamed or re-signatured. A walk without the new option
+reports what it did before, with one exception, listed under Fixed: a walk that
+includes deleted records now reports a live subtree it used to lose. The default
+walk, `Walk` and `Report` are unchanged. The report schema is unchanged.
+
+### Added
+
+- **`WalkOptions.OnSkip`** (XFAT-U1) is called for every directory a walk
+  reported but did not descend into, with a `SkipReason` and, for a failed read,
+  the underlying error. Until now the only signal was the absence of children,
+  which is what an empty directory looks like too, so whole subtrees were lost
+  in silence. There are five reasons, with the names and values of the sibling
+  `libfat`:
+  - `SkipReadError` - the contents could not be read.
+  - `SkipDepthLimit` - the directory sits on `MaxDepth`.
+  - `SkipRevisit` - a cycle or cross-link: its first cluster was already walked.
+  - `SkipInvalidCluster` - its first cluster is outside the heap, so nothing was
+    read. The parser already drops such a record when it claims data, so this
+    is a zero-length directory record.
+  - `SkipDeletedUnrecoverable` - `DescendDeletedDirectories` was set, but the
+    bitmap says the deleted directory's first cluster is in use again.
+- `OnSkip` is called only for the entry the walk callback was handed immediately
+  before, and at most once for each. Nothing is reported for a file, a metadata
+  or synthetic entry, a record `IncludeDeleted` left out, or a deleted directory
+  left alone because `DescendDeletedDirectories` is off. An error it returns
+  stops the walk and is returned unchanged. With `StopOnReadError` set, an
+  unreadable directory aborts the walk as before, and `OnSkip` is not called.
+- A live directory whose name is only spaces is reported as `SkipReadError`,
+  with an error wrapping `ErrInvalidEntry`. `ReadDir` declines such a directory
+  and returns nothing and no error, so a walk took it for an empty one. It still
+  never aborts a walk, `StopOnReadError` or not, because `ReadDir` has never
+  called it a failure.
+
+### Fixed
+
+- **A walk including deleted records could lose a live directory's whole
+  subtree** (XFAT-U2). A deleted directory claimed its first cluster in the
+  walk's cycle guard before any attempt to read it. It did so even when it was
+  never descended: `DescendDeletedDirectories` was off, or the bitmap said the
+  cluster was in use again. A live directory that had since taken that cluster
+  was then treated as already walked. That is the ordinary result of removing
+  one directory and creating another: the new record lands after the stale one
+  and gets the freed cluster. A deleted directory now claims its cluster only
+  once it is descended into, so cycles of deleted records are still stopped.
+  `ReportDeep` is affected the same way and now includes the rows it was
+  missing. A walk without `IncludeDeleted` never saw deleted records and is
+  unchanged.
+
 ## [1.4.0] - 2026-09-16
 
 The Go API is additive: no exported symbol was removed, renamed or

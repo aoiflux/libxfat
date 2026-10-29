@@ -1,6 +1,10 @@
 package libxfat
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
 
 // maxWalkDepth bounds how deep a walk descends.
 //
@@ -19,6 +23,40 @@ const maxWalkDepth = 4096
 // caller can recognise the ones whose path is the library's invention rather than
 // the volume's.
 const RecoveredPath = "/" + ORPHANFILES
+
+// SkipReason names why a walk reported a directory but did not descend into it.
+// It is passed to WalkOptions.OnSkip, which is the only way to observe a skip: the
+// alternative signal, a directory reported without children, is what an empty
+// directory looks like too.
+//
+// The names and values are those of the sibling libfat, so a consumer walking both
+// maps them to its own findings once.
+type SkipReason string
+
+const (
+	// SkipReadError: the directory's contents could not be read. The underlying
+	// error is passed to OnSkip alongside this reason. A live directory ReadDir
+	// declines to read - one whose name is blank - arrives here too, with an error
+	// wrapping ErrInvalidEntry: ReadDir returns nothing for it and no error, which
+	// a walk would otherwise take for an empty directory.
+	SkipReadError SkipReason = "read-error"
+	// SkipDepthLimit: the directory sits on WalkOptions.MaxDepth, so it is
+	// reported but not read.
+	SkipDepthLimit SkipReason = "depth-limit"
+	// SkipRevisit: the directory's first cluster had already been descended into,
+	// or is the root's. A valid volume cannot produce this; it is a cycle or a
+	// cross-link, and the record naming it is still reported as evidence.
+	SkipRevisit SkipReason = "revisit"
+	// SkipInvalidCluster: the first cluster is outside the cluster heap, so there
+	// is nothing to read and no read to fail. The parser already refuses a record
+	// naming such a cluster while claiming data, so in practice this is a
+	// directory record whose DataLength is zero.
+	SkipInvalidCluster SkipReason = "invalid-cluster"
+	// SkipDeletedUnrecoverable: DescendDeletedDirectories was set, but the deleted
+	// directory's first cluster is allocated again, so its bytes now belong to
+	// something else. See DescendDeletedDirectories.
+	SkipDeletedUnrecoverable SkipReason = "deleted-unrecoverable"
+)
 
 // WalkOptions tunes a walk.
 //
@@ -56,7 +94,14 @@ type WalkOptions struct {
 	// the bitmap then says the bytes belong to something else and parsing them as
 	// directory records would attribute one file's content to another file's
 	// name. exFAT has no "." record to cross-check against, unlike FAT12 and
-	// FAT16, so the allocation state is the only guard available.
+	// FAT16, so the allocation state is the only guard available. A directory
+	// abandoned this way is reported to OnSkip as SkipDeletedUnrecoverable.
+	//
+	// A deleted directory counts as walked, for the cycle guard, only once it has
+	// been descended into. Until then its first cluster is not its own to claim,
+	// and the likeliest owner is a live directory created after it was removed:
+	// the new record is written after the stale one and handed the freed cluster.
+	// That live directory is walked whether or not the deleted one came first.
 	DescendDeletedDirectories bool
 
 	// IncludeRecovered appends what RecoverDeletedEntries carves out of
@@ -84,17 +129,48 @@ type WalkOptions struct {
 	//
 	// A directory sitting on the limit is still reported; only its contents are
 	// not read. Exceeding the limit is not an error, because a crafted image that
-	// nests a million directories should truncate a walk rather than fail it, and
-	// because the truncation is visible in the absence of children under a
-	// directory the callback was handed.
+	// nests a million directories should truncate a walk rather than fail it.
+	// Set OnSkip to learn which directories were truncated this way: the only
+	// other signal is the absence of children under a directory the callback was
+	// handed, which is indistinguishable from an empty one.
 	MaxDepth int
 
 	// StopOnReadError makes a directory that cannot be read abort the walk and
 	// return the underlying error. By default such a directory is reported - its
 	// own record is real evidence whether or not what it points at survives - its
 	// contents are skipped, and the walk continues, which is the same choice
-	// FragmentResult makes when it returns the runs it managed to walk.
+	// FragmentResult makes when it returns the runs it managed to walk. OnSkip
+	// reports those directories without aborting anything.
 	StopOnReadError bool
+
+	// OnSkip is called for every directory the walk reported but did not descend
+	// into, with the reason and, for SkipReadError, the error the read failed
+	// with. It is how a caller tells an empty directory from a truncated one,
+	// which is otherwise impossible: both are reported without children.
+	//
+	// It is only ever called for the entry the walk callback was handed
+	// immediately before, with the same path, and at most once for each. The
+	// conditions are tested in the order SkipDepthLimit, SkipInvalidCluster,
+	// SkipRevisit, SkipReadError, SkipDeletedUnrecoverable, and the first that
+	// holds is the one reported. A live directory named twice whose first read
+	// failed is reported SkipReadError and then SkipRevisit, because the cycle
+	// guard is marked before the attempt.
+	//
+	// Nothing is reported for a file, for the $BitMap, $UpCase and synthetic
+	// entries - which name no directory data - for a deleted record
+	// IncludeDeleted left out, or for a deleted directory not descended because
+	// DescendDeletedDirectories is off: that last is the caller's own choice
+	// rather than something the walk decided.
+	//
+	// With StopOnReadError set, an unreadable directory aborts the walk and
+	// OnSkip is not called, because nothing was skipped. The blank-named
+	// directory ReadDir declines is the exception: ReadDir has never reported it
+	// as a failure, so it has never aborted a walk, and it is reported here
+	// whether or not StopOnReadError is set.
+	//
+	// An error returned by OnSkip stops the walk immediately and is returned
+	// unchanged, exactly as the walk callback's own error is.
+	OnSkip func(path string, e Entry, reason SkipReason, err error) error
 }
 
 // Walk calls fn for every entry in the volume's directory tree, depth first and
@@ -169,10 +245,14 @@ func (e *ExFAT) Walk(ctx context.Context,
 // reported each time it is named but descended into only once, keyed on its first
 // cluster. Depth is capped; see WalkOptions.MaxDepth.
 //
-// A skipped directory is not otherwise observable: this package has no warning
-// sink, so a walk that stepped over an unreadable directory returns the same nil a
-// clean one does. To find out why a directory reported no children, call ReadDir
-// on it, which returns the underlying error.
+// Set WalkOptions.OnSkip to learn about every directory the walk declined to
+// descend into - unreadable, depth-capped, already walked, naming a cluster
+// outside the heap, or a deleted directory whose cluster has been taken again -
+// with the reason and the read error if there was one. Without it a skipped
+// directory is not otherwise observable: this package has no warning sink, so a
+// walk that stepped over an unreadable directory returns the same nil a clean one
+// does, and the only remaining way to find out why a directory reported no
+// children is to call ReadDir on it, which returns the underlying error.
 //
 // Cancelling ctx stops the walk and returns ctx.Err() unchanged. Entries already
 // handed to fn are the partial result. A nil ctx or a nil fn is an error.
@@ -190,7 +270,8 @@ type treeWalk struct {
 	opts WalkOptions
 	fn   func(string, uint32, Entry) error
 	prog *scanProgress
-	// seen holds the first cluster of every directory already descended into.
+	// seen holds the first cluster of every directory already descended into,
+	// and of every live directory whose read was attempted.
 	seen     map[uint32]struct{}
 	maxDepth int
 }
@@ -264,28 +345,67 @@ func (w *treeWalk) report(entries []Entry, prefix string, parent uint32, depth i
 			continue
 		}
 		if depth+1 >= w.maxDepth {
-			continue
-		}
-		if !w.fs.vbr.isValidCluster(entry.entryCluster) {
-			continue
-		}
-		if _, done := w.seen[entry.entryCluster]; done {
-			continue
-		}
-
-		// Marked before the attempt, not after it: a corrupt image can name the
-		// same unreadable cluster many times, and one failed read of it is enough.
-		w.seen[entry.entryCluster] = struct{}{}
-
-		children, ok, err := w.children(entry)
-		if err != nil {
-			if w.opts.StopOnReadError {
+			if err := w.skip(path, entry, SkipDepthLimit, nil); err != nil {
 				return err
 			}
 			continue
 		}
-		if !ok {
+		if !w.fs.vbr.isValidCluster(entry.entryCluster) {
+			if err := w.skip(path, entry, SkipInvalidCluster, nil); err != nil {
+				return err
+			}
 			continue
+		}
+		if _, done := w.seen[entry.entryCluster]; done {
+			if err := w.skip(path, entry, SkipRevisit, nil); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// A live directory is marked before the attempt, not after it: a corrupt
+		// image can name the same unreadable cluster many times, and one failed
+		// read of it is enough. A deleted one is marked only once it is descended
+		// into, because until then the cluster may belong to a live directory -
+		// see DescendDeletedDirectories - whose subtree a stale claim would hide.
+		if !entry.IsDeleted() {
+			w.seen[entry.entryCluster] = struct{}{}
+		}
+
+		children, ok, err := w.children(entry)
+		if err != nil {
+			// A cancellation noticed part-way through a deleted directory is the
+			// walk stopping, not a fact about that directory.
+			if ctxErr := w.prog.ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+				return err
+			}
+			if w.opts.StopOnReadError {
+				return err
+			}
+			if serr := w.skip(path, entry, SkipReadError, err); serr != nil {
+				return serr
+			}
+			continue
+		}
+		if !ok {
+			// A live directory declined is one ReadDir will not read. A deleted
+			// one is either the caller's choice - the descent is off, which is not
+			// the walk's finding to report - or the bitmap's refusal, which is.
+			var serr error
+			switch {
+			case !entry.IsDeleted():
+				serr = w.skip(path, entry, SkipReadError,
+					fmt.Errorf("%w: ReadDir does not read a directory whose name is blank", ErrInvalidEntry))
+			case w.opts.DescendDeletedDirectories:
+				serr = w.skip(path, entry, SkipDeletedUnrecoverable, nil)
+			}
+			if serr != nil {
+				return serr
+			}
+			continue
+		}
+		if entry.IsDeleted() {
+			w.seen[entry.entryCluster] = struct{}{}
 		}
 		if err := w.report(children, path+"/", entry.entryCluster, depth+1); err != nil {
 			return err
@@ -294,12 +414,32 @@ func (w *treeWalk) report(entries []Entry, prefix string, parent uint32, depth i
 	return nil
 }
 
+// skip reports a directory the walk did not descend into, if the caller asked to
+// hear about them. The nil check lives here so that the call sites in report read
+// the same way.
+func (w *treeWalk) skip(path string, entry Entry, reason SkipReason, err error) error {
+	if w.opts.OnSkip == nil {
+		return nil
+	}
+	return w.opts.OnSkip(path, entry, reason, err)
+}
+
 // children reads a directory entry's contents. The boolean is false when the
 // entry is a deleted directory that the options or the surviving evidence do not
-// permit descending into, which is not an error.
+// permit descending into, or a live one ReadDir will not read; neither is an
+// error.
 func (w *treeWalk) children(entry Entry) ([]Entry, bool, error) {
 	if entry.IsDeleted() {
 		return w.deletedChildren(entry)
+	}
+
+	// ReadDir returns nothing and no error for an entry it will not parse. For a
+	// live directory that gets this far - not deleted, not special - that means a
+	// name that is only spaces, which the parser's $Unnamed placeholder does not
+	// replace because the name is not empty. Saying so is what lets report tell
+	// it from an empty directory.
+	if entry.NonParsable() {
+		return nil, false, nil
 	}
 
 	entries, err := w.fs.ReadDir(entry)

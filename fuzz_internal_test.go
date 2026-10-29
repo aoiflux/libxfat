@@ -2,6 +2,8 @@ package libxfat
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"testing"
 )
 
@@ -98,5 +100,126 @@ func FuzzOpen(f *testing.F) {
 			_ = entry.Timestamps()
 			_, _, _ = fs.ClusterList(entry)
 		}
+	})
+}
+
+// walkSeedImage is the smallest volume that gives FuzzWalk something to walk: the
+// boot record validTestVBRBytes describes - four 512-byte clusters - with a root
+// naming a directory, a deleted directory and a file, and a directory whose only
+// record names its own cluster, so each kind of skip is a few mutations away.
+func walkSeedImage() []byte {
+	const sector = 512
+	image := make([]byte, 17*sector)
+	copy(image, validTestVBRBytes())
+
+	fat := image[12*sector : 13*sector]
+	for cluster := 2; cluster <= 5; cluster++ {
+		putLELong(fat[cluster*4:], 0xffffffff)
+	}
+	clusterAt := func(cluster int) []byte {
+		start := (13 + cluster - 2) * sector
+		return image[start : start+sector]
+	}
+
+	copy(clusterAt(2), buildDir(
+		buildEntrySet(testSet{name: "dir", attrs: ENTRY_ATTR_DIR_MASK, cluster: 3, size: sector}),
+		buildEntrySet(testSet{name: "gone", attrs: ENTRY_ATTR_DIR_MASK, cluster: 4, size: sector, deleted: true}),
+		buildEntrySet(testSet{name: "file", attrs: 0x20, cluster: 5, size: 10}),
+	))
+	copy(clusterAt(3), buildDir(
+		buildEntrySet(testSet{name: "loop", attrs: ENTRY_ATTR_DIR_MASK, cluster: 3, size: sector}),
+	))
+	return image
+}
+
+// TestWalkSeedImageReachesTheWalk keeps FuzzWalk's seed honest: a seed the volume
+// opener rejects would leave the fuzzer starting from nothing a walk can read.
+func TestWalkSeedImageReachesTheWalk(t *testing.T) {
+	data := walkSeedImage()
+	fs, err := open(Source{Reader: bytes.NewReader(data), Size: int64(len(data))})
+	if err != nil {
+		t.Fatalf("open the seed: %v", err)
+	}
+
+	var skipped []string
+	err = fs.WalkWithOptions(context.Background(), WalkOptions{
+		OnSkip: func(path string, _ Entry, reason SkipReason, _ error) error {
+			skipped = append(skipped, string(reason)+" "+path)
+			return nil
+		},
+	}, func(string, uint32, Entry) error { return nil })
+	if err != nil {
+		t.Fatalf("walk the seed: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0] != string(SkipRevisit)+" /dir/loop" {
+		t.Fatalf("skips = %q, want the one revisit of /dir/loop", skipped)
+	}
+}
+
+// FuzzWalk drives a whole walk, with every option the fuzzer can toggle, and holds
+// OnSkip to its contract on whatever tree the bytes describe.
+func FuzzWalk(f *testing.F) {
+	f.Add(make([]byte, 32), false, false, false, uint8(0))
+	seed := walkSeedImage()
+	f.Add(seed, false, false, false, uint8(0))
+	f.Add(seed, true, true, false, uint8(1))
+	f.Add(seed, true, true, true, uint8(0))
+
+	errBudget := errors.New("fuzz budget exhausted")
+
+	f.Fuzz(func(t *testing.T, data []byte, includeDeleted, descendDeleted, includeRecovered bool, maxDepth uint8) {
+		fs, err := open(Source{Reader: bytes.NewReader(data), Size: int64(len(data))})
+		if err != nil {
+			return
+		}
+
+		calls := 0
+		last := ""
+		// pending is set by each walk callback and spent by the skip that follows
+		// it, which is how "at most once, and only after the entry was reported"
+		// is checked.
+		pending := false
+		_ = fs.WalkWithOptions(context.Background(), WalkOptions{
+			IncludeDeleted:            includeDeleted,
+			DescendDeletedDirectories: descendDeleted,
+			IncludeRecovered:          includeRecovered,
+			MaxDepth:                  int(maxDepth),
+			OnSkip: func(path string, e Entry, reason SkipReason, err error) error {
+				switch reason {
+				case SkipReadError:
+					if err == nil {
+						t.Fatalf("%s: %s reported without an error", path, reason)
+					}
+				case SkipDepthLimit, SkipRevisit, SkipInvalidCluster, SkipDeletedUnrecoverable:
+					if err != nil {
+						t.Fatalf("%s: %s reported with an error %v; no read was attempted", path, reason, err)
+					}
+				default:
+					t.Fatalf("%s: unknown skip reason %q", path, reason)
+				}
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("%s: a cancellation was reported as a skip: %v", path, err)
+				}
+				if !pending || path != last {
+					t.Fatalf("OnSkip(%q) does not follow its own walk callback (last reported %q)", path, last)
+				}
+				pending = false
+				if !e.IsDir() {
+					t.Fatalf("%s was reported skipped but is not a directory", path)
+				}
+				return nil
+			},
+		}, func(path string, _ uint32, _ Entry) error {
+			calls++
+			if calls > 1<<14 {
+				return errBudget
+			}
+			if path == "" || path[0] != '/' {
+				t.Fatalf("path %q is not rooted", path)
+			}
+			last = path
+			pending = true
+			return nil
+		})
 	})
 }
