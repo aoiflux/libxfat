@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.0] - 2026-10-29
+## [1.4.1] - 2026-10-29
 
 The Go API is additive: two options, two types and six constants are new, and
 nothing was removed, renamed or re-signatured. A walk without the new options
@@ -72,8 +72,8 @@ walk, `Walk` and `Report` are unchanged. The report schema is unchanged.
   `ReportDeep` is affected the same way and now includes the rows it was
   missing. A walk without `IncludeDeleted` never saw deleted records and is
   unchanged.
-- The README pointed at a `RELEASE_NOTES.md` that never existed. It now points
-  at this file.
+- The README listed and linked a `RELEASE_NOTES.md` that did not exist. It now
+  exists and describes the current release; this file remains the full record.
 
 ## [1.4.0] - 2026-09-16
 

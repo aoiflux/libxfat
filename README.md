@@ -148,13 +148,14 @@ The internal parser architecture and zero-copy boundaries are documented in
 The module currently targets Go 1.25 as declared in `go.mod`.
 
 The import path is `github.com/aoiflux/libxfat`, unchanged. The current release
-is v1.5.0, which is additive: `WalkOptions.OnSkip` reports the directories a walk
+is v1.4.1, which is additive: `WalkOptions.OnSkip` reports the directories a walk
 did not descend into or read only in part, `OnRecoveredScan` reports what the
 free-space sweep could not cover, and a walk that includes deleted records no
-longer loses a live directory that reused a deleted one's cluster. v1.4.0 before
-it added a file-relative offset to every extent and a schema-version header to
-the report, and v1.3.0 renamed and removed some exported API; see
-[CHANGELOG.md](CHANGELOG.md) for each release and why.
+longer loses a live directory that reused a deleted one's cluster - see
+[RELEASE_NOTES.md](RELEASE_NOTES.md). v1.4.0 before it added a file-relative
+offset to every extent and a schema-version header to the report, and v1.3.0
+renamed and removed some exported API; see [CHANGELOG.md](CHANGELOG.md) for each
+release and why.
 
 ## Quick Start
 

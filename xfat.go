@@ -23,8 +23,10 @@
 // pre-order and in disk order, with the composed path and the parent directory's
 // first cluster, and it takes a context so a pass over a large volume can be
 // stopped. WalkWithOptions adds deleted records, the surviving children of a
-// deleted directory, and the free-space sweep, and its OnSkip callback names every
-// directory the walk reported but could not or would not descend into, and why.
+// deleted directory, and the free-space sweep. Its OnSkip callback names every
+// directory the walk reported but could not or would not descend into, or could
+// read only in part, and why; OnRecoveredScan says how much of the heap the sweep
+// covered.
 //
 //	err := fs.Walk(ctx, func(path string, parent uint32, entry libxfat.Entry) error {
 //		id, _ := fs.FileID(entry)
