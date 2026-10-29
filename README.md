@@ -12,7 +12,8 @@ The library is read-oriented. It does not create or modify exFAT volumes.
   be layered directly over a decoded EWF/VHD device or a partition reader.
 - Walk the whole tree in one cancellable pass, with paths, parent identity and a
   cycle guard — and no filter hiding fragmented files. `WalkOptions.OnSkip`
-  reports every directory the walk could not descend into, and why.
+  reports every directory the walk could not descend into or read only in part,
+  and why.
 - Map any file to absolute byte ranges without reading its content, with the
   provenance of every range reported rather than assumed.
 - Read file content in memory through `io.ReaderAt`, `io.Reader` or
@@ -148,11 +149,12 @@ The module currently targets Go 1.25 as declared in `go.mod`.
 
 The import path is `github.com/aoiflux/libxfat`, unchanged. The current release
 is v1.5.0, which is additive: `WalkOptions.OnSkip` reports the directories a walk
-did not descend into, and a walk that includes deleted records no longer loses a
-live directory that reused a deleted one's cluster. v1.4.0 before it added a
-file-relative offset to every extent and a schema-version header to the report -
-see [RELEASE_NOTES.md](RELEASE_NOTES.md). v1.3.0 renamed and removed some
-exported API; see [CHANGELOG.md](CHANGELOG.md) for what moved and why.
+did not descend into or read only in part, `OnRecoveredScan` reports what the
+free-space sweep could not cover, and a walk that includes deleted records no
+longer loses a live directory that reused a deleted one's cluster. v1.4.0 before
+it added a file-relative offset to every extent and a schema-version header to
+the report, and v1.3.0 renamed and removed some exported API; see
+[CHANGELOG.md](CHANGELOG.md) for each release and why.
 
 ## Quick Start
 
@@ -386,10 +388,14 @@ filtered on fragmentation. `WalkOptions` opts into deleted records
 
 A directory the walk reports but does not descend into - unreadable, on the depth
 limit, already walked, naming a cluster outside the heap, or deleted with its
-cluster taken again - otherwise looks exactly like an empty one. Set `OnSkip` to
-hear about each, with a `SkipReason` (`SkipReadError`, `SkipDepthLimit`,
-`SkipRevisit`, `SkipInvalidCluster`, `SkipDeletedUnrecoverable`) and, for a failed
-read, the error. The names and values match the sibling `libfat`.
+cluster taken again - otherwise looks exactly like an empty one, and one it could
+read only part of looks complete. Set `OnSkip` to hear about each, with a
+`SkipReason` (`SkipReadError`, `SkipDepthLimit`, `SkipRevisit`,
+`SkipInvalidCluster`, `SkipDeletedUnrecoverable`, `SkipPartialRead`) and, for a
+failed or partial read, the error. The first five match the sibling `libfat`;
+`SkipPartialRead` is exFAT's own. With `IncludeRecovered`, `OnRecoveredScan`
+receives the sweep's `RecoveredScanResult`, whose `Truncated` says part of the
+heap was never swept.
 
 ```go
 err := fs.WalkWithOptions(ctx, libxfat.WalkOptions{

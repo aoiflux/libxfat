@@ -25,6 +25,8 @@ const (
 	skAfter  = 66
 	skGhost  = 67 // a deleted directory whose cluster is still free
 	skKept   = 68 // the live directory's child at skReused
+	skSplit  = 69 // a deleted directory's first cluster, still free and full of records
+	skSplit2 = 70 // its second cluster, taken again
 
 	// skFar is far past the end of the cluster heap, so there is nothing to read
 	// and no read to fail. The parser refuses a stream extension that names such a
@@ -53,6 +55,7 @@ const (
 //	/old                deleted, first cluster 65 - which /new has since taken
 //	/new                cluster 65, holds kept.txt
 //	/ghost              deleted, cluster 67 still free, holds a deleted "again" naming 67
+//	/split              deleted, clusters 69-70 by NoFatChain; 69 is free and full, 70 is taken
 //	/after.txt
 //
 // Like buildDamagedImage it is a copy: the bad chain and the cycle forfeit the
@@ -107,6 +110,13 @@ func buildSkipImage(t *testing.T) []byte {
 		noFatChain: true, deleted: true,
 	}))
 
+	// The split directory's first cluster is still free and holds deleted records
+	// to its last byte, so the descent has to look at the second - which the
+	// bitmap says something else owns now.
+	fillDirCluster(clusterAt(skSplit), true)
+	setFat(skSplit2, 0xffffffff)
+	markAllocated(skSplit2)
+
 	for _, cluster := range []uint32{skAfter, skKept} {
 		data := clusterAt(cluster)
 		for i := range data {
@@ -142,9 +152,34 @@ func buildSkipImage(t *testing.T) []byte {
 		name: "ghost", attrs: 0x10, cluster: skGhost, size: sfClusterSize,
 		noFatChain: true, deleted: true,
 	})
+	appendSet(sfEntrySet{
+		name: "split", attrs: 0x10, cluster: skSplit, size: 2 * sfClusterSize,
+		noFatChain: true, deleted: true,
+	})
 	appendSet(sfEntrySet{name: "after.txt", attrs: 0x20, cluster: skAfter, size: 4, noFatChain: true})
 
 	return image
+}
+
+// fillDirClusterSets is how many entry sets fillDirCluster writes: four records
+// each, which is exactly one cluster.
+const fillDirClusterSets = sfClusterSize / (4 * 32)
+
+// fillDirCluster fills a directory cluster with file entry sets to its last byte,
+// so it holds no end-of-directory record and a reader has to go on to the next
+// cluster to finish the directory. Each name is 16 characters, which takes two
+// name records and makes every set four records long.
+func fillDirCluster(cluster []byte, deleted bool) {
+	for i := 0; i < fillDirClusterSets; i++ {
+		set := sfBuildEntrySet(sfEntrySet{
+			name: fillDirClusterName(i), attrs: 0x20, deleted: deleted,
+		})
+		copy(cluster[i*len(set):], set)
+	}
+}
+
+func fillDirClusterName(i int) string {
+	return "partial-entry-" + string(rune('a'+i/26)) + string(rune('a'+i%26))
 }
 
 func openSkipImage(t *testing.T, image []byte) *libxfat.ExFAT {

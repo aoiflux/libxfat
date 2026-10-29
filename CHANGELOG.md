@@ -6,8 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.5.0] - 2026-10-29
 
-The Go API is additive: one option, one type and five constants are new, and
-nothing was removed, renamed or re-signatured. A walk without the new option
+The Go API is additive: two options, two types and six constants are new, and
+nothing was removed, renamed or re-signatured. A walk without the new options
 reports what it did before, with one exception, listed under Fixed: a walk that
 includes deleted records now reports a live subtree it used to lose. The default
 walk, `Walk` and `Report` are unchanged. The report schema is unchanged.
@@ -39,6 +39,24 @@ walk, `Walk` and `Report` are unchanged. The report schema is unchanged.
   and returns nothing and no error, so a walk took it for an empty one. It still
   never aborts a walk, `StopOnReadError` or not, because `ReadDir` has never
   called it a failure.
+- **`SkipPartialRead`**, a sixth reason, exFAT's own, is reported for a directory
+  the walk did descend into but could read only part of. The children that were
+  read are still reported, after it, and the error says what cut the read short.
+  A live directory that runs off the end of a truncated image before its
+  end-of-directory record arrives with the EOF. One whose records had already
+  ended loses nothing and is not reported. A deleted directory whose NoFatChain
+  range reaches a cluster the bitmap says is in use again arrives with an error
+  wrapping `ErrDeletedEntry`. Both cases used to look like a complete directory.
+  Like the blank-name case, it never aborts a walk. libfat has no equivalent: a
+  FAT directory is read whole or fails.
+- **`WalkOptions.OnRecoveredScan`** is called once with a `*RecoveredScanResult`
+  when `IncludeRecovered` is set, before any carved entry is reported.
+  `ClustersSwept` counts the unallocated clusters read. `ClustersUnclassified`
+  counts the heap clusters the allocation bitmap could not answer for, because
+  the image ends inside the `$BitMap` stream. `Truncated` is set when there are
+  any. Such a sweep used to return nil with no sign that part of the heap was
+  never looked at. An error the callback returns stops the walk, and no carved
+  entry is reported. The shape follows libfat's `OnOrphanScan`.
 
 ### Fixed
 
@@ -54,6 +72,8 @@ walk, `Walk` and `Report` are unchanged. The report schema is unchanged.
   `ReportDeep` is affected the same way and now includes the rows it was
   missing. A walk without `IncludeDeleted` never saw deleted records and is
   unchanged.
+- The README pointed at a `RELEASE_NOTES.md` that never existed. It now points
+  at this file.
 
 ## [1.4.0] - 2026-09-16
 

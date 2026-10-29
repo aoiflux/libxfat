@@ -306,7 +306,7 @@ func (e *ExFAT) ReadDir(entry Entry) ([]Entry, error) {
 	if entry.NonParsable() {
 		return nil, nil
 	}
-	entries, err := e.readDirEntries(entry)
+	entries, _, err := e.readDirEntries(entry)
 	if err != nil && !isEOF(err) {
 		return nil, err
 	}
@@ -330,7 +330,8 @@ func (e *ExFAT) ReadRootDir() ([]Entry, error) {
 // a large mostly-empty image that is a long time to hold a caller. Use
 // RecoverDeletedEntriesContext to be able to stop.
 func (e *ExFAT) RecoverDeletedEntries() ([]Entry, error) {
-	return e.recoverDeleted(&scanProgress{ctx: context.Background()})
+	carved, _, err := e.recoverDeleted(&scanProgress{ctx: context.Background()})
+	return carved, err
 }
 
 // RecoverDeletedEntriesContext is RecoverDeletedEntries, stoppable.
@@ -345,13 +346,22 @@ func (e *ExFAT) RecoverDeletedEntriesContext(ctx context.Context) ([]Entry, erro
 	if ctx == nil {
 		return nil, ErrNilContext
 	}
-	return e.recoverDeleted(&scanProgress{ctx: ctx})
+	carved, _, err := e.recoverDeleted(&scanProgress{ctx: ctx})
+	return carved, err
 }
 
-func (e *ExFAT) recoverDeleted(prog *scanProgress) ([]Entry, error) {
-	unallocated, err := e.getUnallocatedClusters()
+// recoverDeleted carves the unallocated clusters and says how much of the heap
+// that covered. The result is only meaningful alongside a nil error.
+func (e *ExFAT) recoverDeleted(prog *scanProgress) ([]Entry, RecoveredScanResult, error) {
+	var result RecoveredScanResult
+
+	unallocated, classified, err := e.getUnallocatedClusters()
 	if err != nil {
-		return nil, err
+		return nil, result, err
+	}
+	if classified < e.vbr.nbClusters {
+		result.ClustersUnclassified = e.vbr.nbClusters - classified
+		result.Truncated = true
 	}
 
 	var deleted []Entry
@@ -375,23 +385,29 @@ func (e *ExFAT) recoverDeleted(prog *scanProgress) ([]Entry, error) {
 
 	for _, cluster := range unallocated {
 		if err := prog.check(); err != nil {
-			return nil, err
+			return nil, result, err
 		}
 
 		buf := state.ensureBuf(&e.vbr)
 		if err := e.vbr.readClusterInto(cluster, buf); err != nil {
-			return nil, err
+			return nil, result, err
 		}
 		parser.resetDirParser()
 		deleted = append(deleted, parser.parseDeletedDirEntries(cluster, buf)...)
+		result.ClustersSwept++
 	}
 
-	return deleted, nil
+	return deleted, result, nil
 }
 
-func (e *ExFAT) getUnallocatedClusters() ([]uint32, error) {
+// getUnallocatedClusters lists the clusters the allocation bitmap marks free,
+// and counts how many clusters it classified at all. The two differ from the
+// heap only when the image ends inside the $BitMap stream: the bits past that
+// point were never read, so those clusters are neither free nor in use as far as
+// anything here can tell.
+func (e *ExFAT) getUnallocatedClusters() ([]uint32, uint32, error) {
 	if err := e.ensureBitmapEntry(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var unallocated []uint32
@@ -412,13 +428,13 @@ func (e *ExFAT) getUnallocatedClusters() ([]uint32, error) {
 		return nil
 	})
 	if errors.Is(err, errStopClusterWalk) {
-		return unallocated, nil
+		return unallocated, clusterIndex, nil
 	}
 	if err != nil && !isEOF(err) {
-		return nil, err
+		return nil, 0, err
 	}
 
-	return unallocated, nil
+	return unallocated, clusterIndex, nil
 }
 
 func (e *ExFAT) CountClusters(entry Entry) (int, error) {
@@ -448,7 +464,10 @@ func (e *ExFAT) ClusterOffset(cluster uint32) (uint64, error) {
 	return e.vbr.getClusterOffset(cluster), nil
 }
 
-func (e *ExFAT) readDirEntries(entry Entry) ([]Entry, error) {
+// readDirEntries parses a directory's records. The boolean reports that the
+// end-of-directory record was reached, which is what tells a read cut short by
+// the end of the image from one that had already found everything.
+func (e *ExFAT) readDirEntries(entry Entry) ([]Entry, bool, error) {
 	var entries []Entry
 	done := false
 	parser := newDirParser(&e.vbr, e.optimistic, e.rejectChecksumMismatch)
@@ -466,7 +485,7 @@ func (e *ExFAT) readDirEntries(entry Entry) ([]Entry, error) {
 	// $UpCase streams are root-directory records; a record claiming to be one of
 	// them in a subdirectory is malformed, and acting on it would let any
 	// directory on the volume redefine the volume.
-	return entries, err
+	return entries, done, err
 }
 
 func (e *ExFAT) readRootDirEntries() ([]Entry, error) {

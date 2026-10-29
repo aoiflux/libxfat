@@ -56,7 +56,29 @@ const (
 	// directory's first cluster is allocated again, so its bytes now belong to
 	// something else. See DescendDeletedDirectories.
 	SkipDeletedUnrecoverable SkipReason = "deleted-unrecoverable"
+	// SkipPartialRead: the directory was descended into, but only part of it could
+	// be read. The children that were read are reported after this, and the error
+	// passed alongside says what cut the read short - the end of the image, for a
+	// live directory, or for a deleted one a cluster the bitmap says is in use
+	// again, as an error wrapping ErrDeletedEntry. libfat has no such reason: a FAT
+	// directory is read whole or fails.
+	SkipPartialRead SkipReason = "partial-read"
 )
+
+// RecoveredScanResult is the free-space sweep's own account of what it covered,
+// which the entries it carves do not carry.
+type RecoveredScanResult struct {
+	// ClustersSwept is the number of unallocated clusters the sweep read.
+	ClustersSwept uint32
+	// ClustersUnclassified is the number of heap clusters the allocation bitmap
+	// could not answer for, because the image ends inside the $BitMap stream. They
+	// were neither read nor ruled out.
+	ClustersUnclassified uint32
+	// Truncated reports that ClustersUnclassified is not zero: the sweep did not
+	// cover the whole heap, so there may be records no path reaches that it did
+	// not find. The field and its meaning match libfat's OrphanScanResult.
+	Truncated bool
+}
 
 // WalkOptions tunes a walk.
 //
@@ -119,6 +141,10 @@ type WalkOptions struct {
 	// the sweep found its cluster unreferenced. Those are two genuinely different
 	// findings, so neither is suppressed. A caller wanting one row per record can
 	// collapse them on the entry-set offset, which is the same for both.
+	//
+	// The sweep can only read the clusters the allocation bitmap marks free, so
+	// an image that ends inside the $BitMap stream leaves the rest of the heap
+	// unswept. OnRecoveredScan reports that; the carved entries cannot.
 	IncludeRecovered bool
 
 	// MaxDepth is the number of directory levels reported, counting the root's
@@ -144,17 +170,19 @@ type WalkOptions struct {
 	StopOnReadError bool
 
 	// OnSkip is called for every directory the walk reported but did not descend
-	// into, with the reason and, for SkipReadError, the error the read failed
-	// with. It is how a caller tells an empty directory from a truncated one,
-	// which is otherwise impossible: both are reported without children.
+	// into, or descended into only in part, with the reason and, for
+	// SkipReadError and SkipPartialRead, the error that stopped the read. It is
+	// how a caller tells an empty directory from a truncated one, which is
+	// otherwise impossible: both are reported without children.
 	//
 	// It is only ever called for the entry the walk callback was handed
 	// immediately before, with the same path, and at most once for each. The
 	// conditions are tested in the order SkipDepthLimit, SkipInvalidCluster,
-	// SkipRevisit, SkipReadError, SkipDeletedUnrecoverable, and the first that
-	// holds is the one reported. A live directory named twice whose first read
-	// failed is reported SkipReadError and then SkipRevisit, because the cycle
-	// guard is marked before the attempt.
+	// SkipRevisit, SkipReadError, SkipDeletedUnrecoverable, SkipPartialRead, and
+	// the first that holds is the one reported. A live directory named twice
+	// whose first read failed is reported SkipReadError and then SkipRevisit,
+	// because the cycle guard is marked before the attempt. SkipPartialRead is
+	// reported before the children that were read.
 	//
 	// Nothing is reported for a file, for the $BitMap, $UpCase and synthetic
 	// entries - which name no directory data - for a deleted record
@@ -164,13 +192,25 @@ type WalkOptions struct {
 	//
 	// With StopOnReadError set, an unreadable directory aborts the walk and
 	// OnSkip is not called, because nothing was skipped. The blank-named
-	// directory ReadDir declines is the exception: ReadDir has never reported it
-	// as a failure, so it has never aborted a walk, and it is reported here
-	// whether or not StopOnReadError is set.
+	// directory ReadDir declines and a partly read directory are the exceptions:
+	// neither has ever been treated as a failure, so neither has ever aborted a
+	// walk, and both are reported here whether or not StopOnReadError is set.
 	//
 	// An error returned by OnSkip stops the walk immediately and is returned
 	// unchanged, exactly as the walk callback's own error is.
 	OnSkip func(path string, e Entry, reason SkipReason, err error) error
+
+	// OnRecoveredScan is called once with the result of the sweep IncludeRecovered
+	// performs, before any carved entry is reported, and only when the sweep
+	// completed; a sweep that fails returns its error from the walk instead. It
+	// exists because the walk reports the sweep's entries but otherwise discards
+	// its provenance: RecoveredScanResult.Truncated says part of the heap was
+	// never swept.
+	//
+	// An error returned from it stops the walk with that error, and no carved
+	// entry is reported. The walk does not use the result afterwards, so the
+	// callback may keep it.
+	OnRecoveredScan func(result *RecoveredScanResult) error
 }
 
 // Walk calls fn for every entry in the volume's directory tree, depth first and
@@ -248,11 +288,15 @@ func (e *ExFAT) Walk(ctx context.Context,
 // Set WalkOptions.OnSkip to learn about every directory the walk declined to
 // descend into - unreadable, depth-capped, already walked, naming a cluster
 // outside the heap, or a deleted directory whose cluster has been taken again -
-// with the reason and the read error if there was one. Without it a skipped
-// directory is not otherwise observable: this package has no warning sink, so a
-// walk that stepped over an unreadable directory returns the same nil a clean one
-// does, and the only remaining way to find out why a directory reported no
-// children is to call ReadDir on it, which returns the underlying error.
+// or could read only part of, with the reason and the read error if there was
+// one. Without it a skipped directory is not otherwise observable: this package
+// has no warning sink, so a walk that stepped over an unreadable directory
+// returns the same nil a clean one does, and the only remaining way to find out
+// why a directory reported no children is to call ReadDir on it, which returns
+// the underlying error.
+//
+// With IncludeRecovered, WalkOptions.OnRecoveredScan likewise reports what the
+// free-space sweep itself could not cover.
 //
 // Cancelling ctx stops the walk and returns ctx.Err() unchanged. Entries already
 // handed to fn are the partial result. A nil ctx or a nil fn is an error.
@@ -372,7 +416,7 @@ func (w *treeWalk) report(entries []Entry, prefix string, parent uint32, depth i
 			w.seen[entry.entryCluster] = struct{}{}
 		}
 
-		children, ok, err := w.children(entry)
+		got, err := w.children(entry)
 		if err != nil {
 			// A cancellation noticed part-way through a deleted directory is the
 			// walk stopping, not a fact about that directory.
@@ -387,7 +431,7 @@ func (w *treeWalk) report(entries []Entry, prefix string, parent uint32, depth i
 			}
 			continue
 		}
-		if !ok {
+		if got.declined {
 			// A live directory declined is one ReadDir will not read. A deleted
 			// one is either the caller's choice - the descent is off, which is not
 			// the walk's finding to report - or the bitmap's refusal, which is.
@@ -407,7 +451,12 @@ func (w *treeWalk) report(entries []Entry, prefix string, parent uint32, depth i
 		if entry.IsDeleted() {
 			w.seen[entry.entryCluster] = struct{}{}
 		}
-		if err := w.report(children, path+"/", entry.entryCluster, depth+1); err != nil {
+		if got.cut != nil {
+			if serr := w.skip(path, entry, SkipPartialRead, got.cut); serr != nil {
+				return serr
+			}
+		}
+		if err := w.report(got.entries, path+"/", entry.entryCluster, depth+1); err != nil {
 			return err
 		}
 	}
@@ -424,11 +473,20 @@ func (w *treeWalk) skip(path string, entry Entry, reason SkipReason, err error) 
 	return w.opts.OnSkip(path, entry, reason, err)
 }
 
-// children reads a directory entry's contents. The boolean is false when the
-// entry is a deleted directory that the options or the surviving evidence do not
-// permit descending into, or a live one ReadDir will not read; neither is an
-// error.
-func (w *treeWalk) children(entry Entry) ([]Entry, bool, error) {
+// listing is what children read of one directory.
+type listing struct {
+	entries []Entry
+	// declined is set when nothing was read and that is not a failure: a deleted
+	// directory the options or the bitmap do not permit descending into, or a
+	// live one ReadDir will not read.
+	declined bool
+	// cut is set when only part of the directory could be read, and says why;
+	// entries holds what came before it.
+	cut error
+}
+
+// children reads a directory entry's contents.
+func (w *treeWalk) children(entry Entry) (listing, error) {
 	if entry.IsDeleted() {
 		return w.deletedChildren(entry)
 	}
@@ -439,17 +497,24 @@ func (w *treeWalk) children(entry Entry) ([]Entry, bool, error) {
 	// replace because the name is not empty. Saying so is what lets report tell
 	// it from an empty directory.
 	if entry.NonParsable() {
-		return nil, false, nil
+		return listing{declined: true}, nil
 	}
 
-	entries, err := w.fs.ReadDir(entry)
-	// ReadDir tolerates the end of a truncated image and returns what it read
-	// alongside the EOF; a directory running off the end of the image is not a
-	// reason to lose the records that were there.
+	// This is ReadDir's read, with the one fact ReadDir does not return: whether
+	// the end-of-directory record was reached.
+	entries, complete, err := w.fs.readDirEntries(entry)
 	if err != nil && !isEOF(err) {
-		return nil, false, err
+		return listing{}, err
 	}
-	return entries, true, nil
+	// The end of a truncated image is tolerated, as ReadDir tolerates it: it is
+	// not a reason to lose the records that were there. It is only a loss when it
+	// came before the end-of-directory record; a directory whose records had
+	// already ended lost nothing to it.
+	got := listing{entries: entries}
+	if err != nil && !complete {
+		got.cut = err
+	}
+	return got, nil
 }
 
 // deletedChildren reads the records that survive in a deleted directory's
@@ -465,18 +530,19 @@ func (w *treeWalk) children(entry Entry) ([]Entry, bool, error) {
 // Each cluster is checked against the allocation bitmap immediately before it is
 // read, and the descent stops at the first one that is in use again. Parsing a
 // reallocated cluster would take some later file's content and report it as this
-// directory's children.
-func (w *treeWalk) deletedChildren(entry Entry) ([]Entry, bool, error) {
+// directory's children. Stopping there after reading at least one cluster is a
+// partial read, and the listing says so.
+func (w *treeWalk) deletedChildren(entry Entry) (listing, error) {
 	if !w.opts.DescendDeletedDirectories {
-		return nil, false, nil
+		return listing{declined: true}, nil
 	}
 
 	located, err := w.fs.FragmentOffsetsWithOptions(entry, FragmentOptions{})
 	if err != nil {
-		return nil, false, err
+		return listing{}, err
 	}
 	if located.FirstClusterReallocated {
-		return nil, false, nil
+		return listing{declined: true}, nil
 	}
 
 	parser := newDirParser(&w.fs.vbr, w.fs.optimistic, w.fs.rejectChecksumMismatch)
@@ -486,6 +552,7 @@ func (w *treeWalk) deletedChildren(entry Entry) ([]Entry, bool, error) {
 	defer w.fs.vbr.releaseVisit(state)
 
 	var entries []Entry
+	read := 0
 	for _, run := range located.Ranges {
 		for i := uint32(0); i < run.ClusterCount; i++ {
 			cluster := run.StartCluster + i
@@ -493,31 +560,46 @@ func (w *treeWalk) deletedChildren(entry Entry) ([]Entry, bool, error) {
 			// An unreadable bitmap is not evidence that the cluster was reused,
 			// so it does not stop the descent; a bitmap that says "in use" is.
 			if allocated, bitmapErr := w.fs.IsClusterAllocated(cluster); bitmapErr == nil && allocated {
-				return entries, true, nil
+				if read == 0 {
+					return listing{declined: true}, nil
+				}
+				return listing{
+					entries: entries,
+					cut:     fmt.Errorf("%w: cluster %d is allocated again", ErrDeletedEntry, cluster),
+				}, nil
 			}
 
 			if err := w.prog.check(); err != nil {
-				return nil, false, err
+				return listing{}, err
 			}
 
 			buf := state.ensureBuf(&w.fs.vbr)
 			if err := w.fs.vbr.readClusterInto(cluster, buf); err != nil {
-				return nil, false, err
+				return listing{}, err
 			}
+			read++
 			if parser.parseDirChunk(cluster, buf, &entries) {
-				return entries, true, nil
+				return listing{entries: entries}, nil
 			}
 		}
 	}
-	return entries, true, nil
+	return listing{entries: entries}, nil
 }
 
 // recovered reports the entries carved out of clusters that no path reaches,
 // after the whole reachable tree.
 func (w *treeWalk) recovered() error {
-	carved, err := w.fs.recoverDeleted(w.prog)
+	carved, result, err := w.fs.recoverDeleted(w.prog)
 	if err != nil {
 		return err
+	}
+	// The sweep's own account of what it could not cover, which the entries
+	// alone do not carry. Before the entries, so that a caller refusing a
+	// truncated sweep refuses it whole.
+	if w.opts.OnRecoveredScan != nil {
+		if herr := w.opts.OnRecoveredScan(&result); herr != nil {
+			return herr
+		}
 	}
 
 	prefix := RecoveredPath + "/"

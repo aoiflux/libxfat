@@ -173,7 +173,7 @@ func FuzzWalk(f *testing.F) {
 			return
 		}
 
-		calls := 0
+		calls, scans := 0, 0
 		last := ""
 		// pending is set by each walk callback and spent by the skip that follows
 		// it, which is how "at most once, and only after the entry was reported"
@@ -186,7 +186,7 @@ func FuzzWalk(f *testing.F) {
 			MaxDepth:                  int(maxDepth),
 			OnSkip: func(path string, e Entry, reason SkipReason, err error) error {
 				switch reason {
-				case SkipReadError:
+				case SkipReadError, SkipPartialRead:
 					if err == nil {
 						t.Fatalf("%s: %s reported without an error", path, reason)
 					}
@@ -206,6 +206,21 @@ func FuzzWalk(f *testing.F) {
 				pending = false
 				if !e.IsDir() {
 					t.Fatalf("%s was reported skipped but is not a directory", path)
+				}
+				return nil
+			},
+			OnRecoveredScan: func(result *RecoveredScanResult) error {
+				scans++
+				if !includeRecovered || scans > 1 {
+					t.Fatalf("OnRecoveredScan ran %d times with IncludeRecovered %v", scans, includeRecovered)
+				}
+				if result.Truncated != (result.ClustersUnclassified > 0) {
+					t.Fatalf("Truncated %v disagrees with %d unclassified clusters",
+						result.Truncated, result.ClustersUnclassified)
+				}
+				if uint64(result.ClustersSwept)+uint64(result.ClustersUnclassified) > uint64(fs.vbr.nbClusters) {
+					t.Fatalf("%d swept and %d unclassified exceed the heap's %d clusters",
+						result.ClustersSwept, result.ClustersUnclassified, fs.vbr.nbClusters)
 				}
 				return nil
 			},
