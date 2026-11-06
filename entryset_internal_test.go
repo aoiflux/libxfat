@@ -536,3 +536,15 @@ func TestParseDirDeletedSetKeepsNameInStrictMode(t *testing.T) {
 		t.Error("deleted entry did not verify")
 	}
 }
+
+// TestParseDirReadsLongestName is a 255-unit name: 17 name records, SecondaryCount 18.
+func TestParseDirReadsLongestName(t *testing.T) {
+	name := strings.Repeat("a", 255)
+	long := buildEntrySet(testSet{name: name, attrs: ENTRY_ATTR_ATTR_MASK, cluster: 7, size: 10})
+
+	entries := newTestParser(true).parseDir(buildDir(long))
+
+	if len(entries) != 1 || entries[0].Name() != name {
+		t.Fatalf("parsed %d entries, want the one with the 255-unit name", len(entries))
+	}
+}
