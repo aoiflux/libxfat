@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-11-09
+
+A fix release. The Go API and the report schema are unchanged.
+
+### Fixed
+
+- **Names of 241 to 255 code units were lost.** Such a name needs 17 name
+  records, so with the stream extension its file entry set has a
+  SecondaryCount of 18, the most the specification allows. The file entry
+  check refused anything over 17, so the entry was silently left out of
+  `ReadDir`, `Walk`, `RecoverDeletedEntries` and the report. That covered live
+  and deleted entries alike. Sets of up to 18 secondaries are now accepted
+  (#1, donran).
+
 ## [1.4.1] - 2026-10-29
 
 The Go API is additive: two options, two types and six constants are new, and

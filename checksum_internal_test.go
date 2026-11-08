@@ -116,7 +116,7 @@ func TestExfatDirSetChecksumMatchesSpec(t *testing.T) {
 		return byte(state >> 24)
 	}
 
-	for _, secondaries := range []int{1, 2, 3, 17} {
+	for _, secondaries := range []int{1, 2, 3, 17, 18} {
 		for trial := 0; trial < 500; trial++ {
 			set := make([]byte, (secondaries+1)*EXFAT_DIRRECORD_SIZE)
 			for i := range set {

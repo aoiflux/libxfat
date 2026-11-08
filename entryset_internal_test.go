@@ -537,6 +537,21 @@ func TestParseDirDeletedSetKeepsNameInStrictMode(t *testing.T) {
 	}
 }
 
+// TestParseDirDeletedSetReadsLongestName is the carving path for a 255-unit name.
+func TestParseDirDeletedSetReadsLongestName(t *testing.T) {
+	name := strings.Repeat("a", 255)
+	set := buildEntrySet(testSet{name: name, attrs: ENTRY_ATTR_ATTR_MASK, cluster: 5, size: 10, deleted: true})
+
+	entries := newTestParser(true).parseDeletedDirEntries(unlocatedChunk, buildDir(set))
+
+	if len(entries) != 1 || entries[0].Name() != name {
+		t.Fatalf("parsed %d deleted entries, want the one with the 255-unit name", len(entries))
+	}
+	if !entries[0].NameChecksumVerified() {
+		t.Error("deleted entry did not verify")
+	}
+}
+
 // TestParseDirReadsLongestName is a 255-unit name: 17 name records, SecondaryCount 18.
 func TestParseDirReadsLongestName(t *testing.T) {
 	name := strings.Repeat("a", 255)
