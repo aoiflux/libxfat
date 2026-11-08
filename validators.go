@@ -102,7 +102,7 @@ func (v *VBR) validateFileDentry(rec []byte) bool {
 		return false
 	}
 	sc := int(rec[1]) // secondary entries count
-	if sc < 1 || sc > 17 {
+	if sc < 1 || sc > 18 {
 		return false
 	}
 	return true
